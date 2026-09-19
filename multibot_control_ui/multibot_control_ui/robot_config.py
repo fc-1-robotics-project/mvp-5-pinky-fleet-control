@@ -1,0 +1,58 @@
+"""Static robot registry used by the control node and UI."""
+
+from dataclasses import dataclass
+from typing import Tuple
+
+
+@dataclass(frozen=True)
+class RobotConfig:
+    """Topics and presentation settings for one robot."""
+
+    name: str
+    domain_id: int
+    command_topic: str
+    pose_topic: str
+    map_topic: str
+    initial_pose_topic: str
+    navigation_action: str
+    default_initial_pose: Tuple[float, float, float]
+    color: str
+
+
+# This registry is shared by the UI, control node, coordinator, and Nav2
+# clients. Changes to names/domains/topics must also be reflected in the
+# domain bridge configuration and robot-side IDs.
+ROBOTS = (
+    RobotConfig(
+        name='robot1',
+        domain_id=21,
+        command_topic='/robot1/cmd_vel',
+        pose_topic='/robot1/amcl_pose',
+        map_topic='/robot1/map',
+        initial_pose_topic='/robot1/initialpose',
+        navigation_action='/navigate_to_pose',
+        default_initial_pose=(
+            1.3,
+            1.0,
+            -176.0,
+        ),
+        color='#1976d2',
+    ),
+    RobotConfig(
+        name='robot2',
+        domain_id=19,
+        command_topic='/robot2/cmd_vel',
+        pose_topic='/robot2/amcl_pose',
+        map_topic='/robot2/map',
+        initial_pose_topic='/robot2/initialpose',
+        navigation_action='/navigate_to_pose',
+        default_initial_pose=(
+            -0.2,
+            0.6,
+            -90.0,
+        ),
+        color='#e65100',
+    ),
+)
+
+ROBOT_BY_NAME = {robot.name: robot for robot in ROBOTS}

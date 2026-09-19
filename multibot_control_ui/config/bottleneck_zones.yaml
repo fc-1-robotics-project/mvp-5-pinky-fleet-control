@@ -1,0 +1,12 @@
+# Persistent bottleneck definitions. Enable and replace the example coordinates
+# with measured map-frame values, or draw one runtime rectangle from the UI.
+zones:
+  - id: example_bottleneck
+    enabled: false
+    polygon:
+      - [0.0, 0.0]
+      - [1.0, 0.0]
+      - [1.0, 0.6]
+      - [0.0, 0.6]
+    robot_radius_m: 0.09
+    clearance_margin_m: 0.01

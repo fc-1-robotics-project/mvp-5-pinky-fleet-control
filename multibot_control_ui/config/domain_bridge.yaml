@@ -1,0 +1,147 @@
+# Pinky Pro fleet domain bridge
+# robot1: domain 21, robot2: domain 19, control PC: domain 22
+#
+# Repeated source-topic keys are intentional. Each entry bridges the same
+# robot-local topic from a different ROS domain into a namespaced UI topic.
+
+name: pinky_fleet_bridge
+
+topics:
+  # Both maps are exposed to the UI. control_node.py prefers robot1 and uses
+  # robot2 as a fallback when robot1 has not supplied a map.
+  /map:
+    type: nav_msgs/msg/OccupancyGrid
+    from_domain: 21
+    to_domain: 22
+    remap: /robot1/map
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+
+  /map:
+    type: nav_msgs/msg/OccupancyGrid
+    from_domain: 19
+    to_domain: 22
+    remap: /robot2/map
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+
+  # Robot-local pose reporters publish periodically even while stationary.
+  /fleet/pose:
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
+    from_domain: 21
+    to_domain: 22
+    remap: /robot1/amcl_pose
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  /fleet/pose:
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
+    from_domain: 19
+    to_domain: 22
+    remap: /robot2/amcl_pose
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  # Manual commands must enter the robot-local velocity gate as candidates.
+  /robot1/cmd_vel:
+    type: geometry_msgs/msg/Twist
+    from_domain: 22
+    to_domain: 21
+    remap: /cmd_vel_candidate
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  /robot2/cmd_vel:
+    type: geometry_msgs/msg/Twist
+    from_domain: 22
+    to_domain: 19
+    remap: /cmd_vel_candidate
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  # Short-lived motion permits sent by the control UI.
+  /robot1/fleet/permit:
+    type: pinky_interfaces/msg/FleetPermit
+    from_domain: 22
+    to_domain: 21
+    remap: /fleet/permit
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 1
+
+  /robot2/fleet/permit:
+    type: pinky_interfaces/msg/FleetPermit
+    from_domain: 22
+    to_domain: 19
+    remap: /fleet/permit
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 1
+
+  # Gate state returned from each robot to the control UI.
+  /fleet/heartbeat:
+    type: pinky_interfaces/msg/RobotHeartbeat
+    from_domain: 21
+    to_domain: 22
+    remap: /robot1/fleet/heartbeat
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  /fleet/heartbeat:
+    type: pinky_interfaces/msg/RobotHeartbeat
+    from_domain: 19
+    to_domain: 22
+    remap: /robot2/fleet/heartbeat
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  # AMCL initial poses set from the UI.
+  /robot1/initialpose:
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
+    from_domain: 22
+    to_domain: 21
+    remap: /initialpose
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  /robot2/initialpose:
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
+    from_domain: 22
+    to_domain: 19
+    remap: /initialpose
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10

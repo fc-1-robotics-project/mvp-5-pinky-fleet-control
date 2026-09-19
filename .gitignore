@@ -1,0 +1,21 @@
+# ROS 2 / colcon generated files
+build/
+install/
+log/
+
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ROS runtime state
+.ros/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
