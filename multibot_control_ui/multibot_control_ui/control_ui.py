@@ -6,6 +6,8 @@ from tkinter import ttk
 from typing import Optional, Tuple
 
 import rclpy
+from std_srvs.srv import SetBool
+from vision_control.lane_client import FleetLaneClients
 
 from .control_node import create_node, FleetControlNode
 from .fleet_coordinator import FleetCoordinator
@@ -34,10 +36,12 @@ class MultiBotControlUI:
         node: FleetControlNode,
         navigation: FleetNavigationClients,
         coordinator: FleetCoordinator,
+        lane_navigation: FleetLaneClients,
     ) -> None:
         self.node = node
         self.navigation = navigation
         self.coordinator = coordinator
+        self.lane_navigation = lane_navigation
         self.root = tk.Tk()
         self.root.title('Pinky Pro Multi-Robot Control')
         self.root.minsize(1180, 740)
@@ -69,6 +73,7 @@ class MultiBotControlUI:
         self.goal_status = tk.StringVar(
             value='로봇 선택 후 지도에서 클릭하고 진행 방향으로 드래그하세요.',
         )
+        self.lane_after_goal = tk.BooleanVar(value=False)
         self.fleet_status = tk.StringVar(value=coordinator.summary)
         self.gate_status = tk.StringVar(value='로봇 gate heartbeat 수신 대기 중')
         self.navigation_status = {
@@ -89,6 +94,14 @@ class MultiBotControlUI:
         self.closing = False
 
         self._build_ui()
+        self.lane_test_services = [
+            node.create_service(
+                SetBool, f'/{robot.name}/lane/test',
+                lambda request, response, name=robot.name:
+                    self._lane_test_request(name, request, response),
+            )
+            for robot in ROBOTS
+        ]
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
         self.root.after(ROS_POLL_INTERVAL_MS, self._poll_ros)
         self.root.after(UI_REFRESH_INTERVAL_MS, self._refresh_ui)
@@ -168,14 +181,90 @@ class MultiBotControlUI:
             style='Subtitle.TLabel',
         ).grid(row=0, column=1, sticky='e', pady=(0, 12))
 
-        controls = ttk.LabelFrame(container, text='명령 대상', padding=12)
-        controls.grid(row=1, column=0, sticky='ns', padx=(0, 12))
+        controls_shell = ttk.Frame(container)
+        controls_shell.grid(row=1, column=0, sticky='nsew', padx=(0, 12))
+        controls_shell.rowconfigure(0, weight=1)
+        controls_shell.columnconfigure(0, weight=1)
+
+        self.controls_canvas = tk.Canvas(
+            controls_shell,
+            width=430,
+            background='#0b1220',
+            highlightthickness=0,
+        )
+        controls_scrollbar = ttk.Scrollbar(
+            controls_shell,
+            orient='vertical',
+            command=self.controls_canvas.yview,
+        )
+        self.controls_canvas.configure(
+            yscrollcommand=controls_scrollbar.set,
+        )
+        self.controls_canvas.grid(row=0, column=0, sticky='nsew')
+        controls_scrollbar.grid(row=0, column=1, sticky='ns')
+
+        controls = ttk.LabelFrame(
+            self.controls_canvas,
+            text='명령 대상',
+            padding=12,
+        )
+        self.controls_window = self.controls_canvas.create_window(
+            (0, 0),
+            window=controls,
+            anchor='nw',
+        )
+        controls.bind('<Configure>', self._on_controls_content_resize)
+        self.controls_canvas.bind(
+            '<Configure>',
+            self._on_controls_canvas_resize,
+        )
+        self.root.bind_all('<MouseWheel>', self._on_controls_mousewheel)
+        self.root.bind_all('<Button-4>', self._on_controls_mousewheel)
+        self.root.bind_all('<Button-5>', self._on_controls_mousewheel)
 
         next_row = self._build_robot_selection_panel(controls)
         next_row = self._build_initial_pose_panel(controls, next_row)
         next_row = self._build_navigation_panel(controls, next_row)
         self._build_fleet_panel(controls, next_row)
         self._build_map_panel(container)
+
+    def _on_controls_content_resize(self, _event: tk.Event) -> None:
+        """Keep the control-column scrollbar aligned with its contents."""
+        self.controls_canvas.configure(
+            scrollregion=self.controls_canvas.bbox('all'),
+        )
+
+    def _on_controls_canvas_resize(self, event: tk.Event) -> None:
+        """Fill the available control-column width without clipping widgets."""
+        self.controls_canvas.itemconfigure(
+            self.controls_window,
+            width=event.width,
+        )
+
+    def _on_controls_mousewheel(self, event: tk.Event) -> Optional[str]:
+        """Scroll the command column when the pointer is over that column."""
+        pointer_x = self.root.winfo_pointerx()
+        pointer_y = self.root.winfo_pointery()
+        canvas_x = self.controls_canvas.winfo_rootx()
+        canvas_y = self.controls_canvas.winfo_rooty()
+        canvas_right = canvas_x + self.controls_canvas.winfo_width()
+        canvas_bottom = canvas_y + self.controls_canvas.winfo_height()
+        inside_controls = (
+            canvas_x <= pointer_x < canvas_right
+            and canvas_y <= pointer_y < canvas_bottom
+        )
+        if not inside_controls:
+            return None
+
+        if (
+            getattr(event, 'num', None) == 4
+            or getattr(event, 'delta', 0) > 0
+        ):
+            direction = -1
+        else:
+            direction = 1
+        self.controls_canvas.yview_scroll(direction, 'units')
+        return 'break'
 
     def _build_robot_selection_panel(self, controls: ttk.LabelFrame) -> int:
         """Build command-target buttons and return the next grid row."""
@@ -267,7 +356,7 @@ class MultiBotControlUI:
         """Build editable AMCL initial-pose controls."""
         initial_pose_panel = ttk.LabelFrame(
             controls,
-            text='AMCL 초기 위치',
+            text='AMCL 초기 위치 / 차선 출구 pose',
             padding=8,
         )
         initial_pose_panel.grid(
@@ -373,6 +462,50 @@ class MultiBotControlUI:
             sticky='ew',
             pady=(8, 0),
         )
+        ttk.Checkbutton(
+            navigation_panel,
+            text='다음 지도 목표 도착 후 우측 차선 주행',
+            variable=self.lane_after_goal,
+        ).grid(
+            row=len(ROBOTS) + 1,
+            column=0,
+            columnspan=2,
+            sticky='w',
+            pady=(8, 0),
+        )
+        ttk.Button(
+            navigation_panel,
+            text='선택 로봇 수동 / 자율 전환',
+            command=self._toggle_manual,
+        ).grid(
+            row=len(ROBOTS) + 2,
+            column=0,
+            columnspan=2,
+            sticky='ew',
+            pady=(6, 0),
+        )
+        ttk.Button(
+            navigation_panel,
+            text='선택 로봇 차선 단독 테스트 시작',
+            command=self._start_lane_test,
+        ).grid(
+            row=len(ROBOTS) + 4,
+            column=0,
+            columnspan=2,
+            sticky='ew',
+            pady=(6, 0),
+        )
+        ttk.Button(
+            navigation_panel,
+            text='선택 로봇 차선 종료 Bool 전송',
+            command=self._publish_lane_finish,
+        ).grid(
+            row=len(ROBOTS) + 3,
+            column=0,
+            columnspan=2,
+            sticky='ew',
+            pady=(6, 0),
+        )
 
         return row + 1
 
@@ -463,14 +596,48 @@ class MultiBotControlUI:
     def _select_robot(self, robot_name: str) -> None:
         self.node.select_robot(robot_name)
         self.selected_robot.set(robot_name)
-        allowed, detail = self.coordinator.select_manual_robot(robot_name)
-        if allowed:
-            self.routing_status.set(
-                f'/cmd_vel -> /{robot_name}/cmd_vel_candidate · {detail}',
-            )
-        else:
-            self.routing_status.set(f'수동 명령 차단 · {detail}')
+        self.routing_status.set(
+            f'{robot_name} 선택됨 · 수동 전환 버튼을 눌러 조작하세요.',
+        )
         self._update_button_styles()
+
+    def _toggle_manual(self) -> None:
+        robot_name = self.selected_robot.get()
+        if not robot_name:
+            self.routing_status.set('먼저 로봇을 선택하세요.')
+            return
+        allowed, detail = self.coordinator.toggle_manual(robot_name)
+        self.routing_status.set(detail if allowed else f'전환 실패 · {detail}')
+
+    def _publish_lane_finish(self) -> None:
+        robot_name = self.selected_robot.get()
+        if not robot_name:
+            self.goal_status.set('차선 종료 신호를 보낼 로봇을 선택하세요.')
+            return
+        self.node.publish_lane_finish(robot_name)
+        self.goal_status.set(f'{robot_name} 차선 종료 Bool 상승 신호 전송')
+
+    def _start_lane_test(self) -> None:
+        """Start lane following directly from the operator-selected lane."""
+        robot_name = self.selected_robot.get()
+        if not robot_name:
+            self.goal_status.set('먼저 로봇을 선택하세요.')
+            return
+        allowed, detail = self.coordinator.submit_lane_test(robot_name)
+        self.goal_status.set(detail if allowed else f'차선 테스트 실패 · {detail}')
+        if allowed:
+            self.node.clear_selection()
+            self.routing_status.set(f'{robot_name} 차선 단독 테스트 · 수동 라우팅 정지')
+
+    def _lane_test_request(self, robot_name, request, response):
+        """Expose the same supervised test controls to a commissioning terminal."""
+        if request.data:
+            response.success, response.message = self.coordinator.submit_lane_test(robot_name)
+        else:
+            self.coordinator.cancel_robot(robot_name)
+            response.success, response.message = True, '차선 테스트 취소 · STOP'
+        self.goal_status.set(response.message)
+        return response
 
     def _emergency_stop(self) -> None:
         self.coordinator.emergency_stop()
@@ -649,12 +816,33 @@ class MultiBotControlUI:
             math.atan2(-delta_y, delta_x) + self.map_geometry[2],
         )
         yaw_degrees = (yaw_degrees + 180.0) % 360.0 - 180.0
-        sent, detail = self.coordinator.submit_goal(
-            robot_name,
-            world_x,
-            world_y,
-            yaw_degrees,
-        )
+        if self.lane_after_goal.get():
+            values = self.initial_pose_values[robot_name]
+            try:
+                exit_pose = (
+                    float(values['x'].get()),
+                    float(values['y'].get()),
+                    float(values['yaw'].get()),
+                )
+            except ValueError:
+                self.goal_status.set('차선 출구 AMCL pose 입력값을 확인하세요.')
+                return
+            sent, detail = self.coordinator.submit_lane_entry_goal(
+                robot_name,
+                world_x,
+                world_y,
+                yaw_degrees,
+                exit_pose,
+            )
+            if sent:
+                self.lane_after_goal.set(False)
+        else:
+            sent, detail = self.coordinator.submit_goal(
+                robot_name,
+                world_x,
+                world_y,
+                yaw_degrees,
+            )
         if not sent:
             self.goal_status.set(f'{robot_name}: {detail}')
             return
@@ -1000,7 +1188,8 @@ class MultiBotControlUI:
         for robot in ROBOTS:
             self.navigation_status[robot.name].set(
                 f'{self.coordinator.robot_details[robot.name]} · '
-                f'{self.navigation.status(robot.name)}',
+                f'{self.navigation.status(robot.name)} · '
+                f'{self.lane_navigation.status(robot.name)}',
             )
 
     def _refresh_fleet_status(self) -> None:
@@ -1014,7 +1203,7 @@ class MultiBotControlUI:
                 )
             else:
                 self.routing_status.set(
-                    f'/cmd_vel -> /{selected}/cmd_vel_candidate · RUN',
+                    f'/cmd_vel -> /{selected}/cmd_vel_manual_candidate · RUN',
                 )
         details = []
         for robot in ROBOTS:
@@ -1023,8 +1212,11 @@ class MultiBotControlUI:
                 details.append(f'{robot.name}: heartbeat 없음')
                 continue
             heartbeat = self.node.heartbeats[robot.name]
+            drive_mode = self.node.drive_mode_status.get(robot.name, {})
+            mode_text = drive_mode.get('mode', 'mode?')
             details.append(
-                f'{robot.name}: {heartbeat.status} ({age:.1f}s)',
+                f'{robot.name}: {heartbeat.status} · {mode_text} '
+                f'({age:.1f}s)',
             )
         self.gate_status.set(' | '.join(details))
 
@@ -1046,21 +1238,27 @@ def main(args=None) -> None:
     """Run the ROS node and Tkinter UI on the control domain."""
     node = create_node(args=args)
     navigation = FleetNavigationClients()
+    lane_navigation = FleetLaneClients(ROBOTS)
     try:
         zones = load_zones(node.zone_config_file)
     except ValueError as error:
         node.get_logger().error(str(error))
         zones = []
-    coordinator = FleetCoordinator(node, navigation, zones)
+    coordinator = FleetCoordinator(
+        node, navigation, zones, lane_navigation=lane_navigation,
+    )
     ui = None
     try:
-        ui = MultiBotControlUI(node, navigation, coordinator)
+        ui = MultiBotControlUI(
+            node, navigation, coordinator, lane_navigation,
+        )
         ui.run()
     except KeyboardInterrupt:
         if ui is not None:
             node.stop_all()
     finally:
         navigation.shutdown()
+        lane_navigation.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

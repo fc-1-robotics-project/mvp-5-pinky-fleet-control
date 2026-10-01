@@ -15,6 +15,9 @@ class RobotConfig:
     map_topic: str
     initial_pose_topic: str
     navigation_action: str
+    drive_mode_request_topic: str
+    drive_mode_status_topic: str
+    lane_finish_topic: str
     default_initial_pose: Tuple[float, float, float]
     color: str
 
@@ -31,6 +34,9 @@ ROBOTS = (
         map_topic='/robot1/map',
         initial_pose_topic='/robot1/initialpose',
         navigation_action='/navigate_to_pose',
+        drive_mode_request_topic='/robot1/drive/mode_request',
+        drive_mode_status_topic='/robot1/drive/mode_status',
+        lane_finish_topic='/robot1/lane/finish',
         default_initial_pose=(
             1.3,
             1.0,
@@ -46,6 +52,9 @@ ROBOTS = (
         map_topic='/robot2/map',
         initial_pose_topic='/robot2/initialpose',
         navigation_action='/navigate_to_pose',
+        drive_mode_request_topic='/robot2/drive/mode_request',
+        drive_mode_status_topic='/robot2/drive/mode_status',
+        lane_finish_topic='/robot2/lane/finish',
         default_initial_pose=(
             -0.2,
             0.6,

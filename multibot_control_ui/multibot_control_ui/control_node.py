@@ -1,5 +1,6 @@
 """ROS interfaces for command routing and fleet localisation monitoring."""
 
+import json
 import math
 import time
 from typing import Dict, Optional
@@ -12,6 +13,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile
 from rclpy.qos import ReliabilityPolicy
+from std_msgs.msg import Bool, String
 
 from .map_math import yaw_degrees_to_quaternion
 from .robot_config import ROBOT_BY_NAME, ROBOTS
@@ -34,6 +36,10 @@ class FleetControlNode(Node):
         self.declare_parameter('zone_config_file', '')
         self.declare_parameter('runtime_zone_robot_radius_m', 0.09)
         self.declare_parameter('runtime_zone_clearance_margin_m', 0.01)
+        self.declare_parameter('lane_exit_position_variance', 0.0025)
+        self.declare_parameter(
+            'lane_exit_yaw_variance', math.radians(2.0) ** 2,
+        )
         input_topic = self.get_parameter(
             'input_cmd_vel_topic',
         ).get_parameter_value().string_value
@@ -54,6 +60,12 @@ class FleetControlNode(Node):
         )
         self.runtime_zone_clearance_margin_m = self._nonnegative_parameter(
             'runtime_zone_clearance_margin_m',
+        )
+        self.lane_exit_position_variance = self._positive_parameter(
+            'lane_exit_position_variance',
+        )
+        self.lane_exit_yaw_variance = self._positive_parameter(
+            'lane_exit_yaw_variance',
         )
 
         # ROS callbacks only update these caches. The coordinator reads them
@@ -83,6 +95,14 @@ class FleetControlNode(Node):
         self.permit_sequences = {robot.name: 0 for robot in ROBOTS}
         self.heartbeats: Dict[str, RobotHeartbeat] = {}
         self.heartbeat_received_at: Dict[str, float] = {}
+        self.requested_drive_modes = {
+            robot.name: 'STOP' for robot in ROBOTS
+        }
+        self.manual_routing_enabled = {
+            robot.name: False for robot in ROBOTS
+        }
+        self.drive_mode_status = {}
+        self.drive_mode_received_at = {}
 
         # All bridged endpoints are namespaced on domain 22. Their robot-local
         # names and domains are defined separately in domain_bridge.yaml.
@@ -99,6 +119,18 @@ class FleetControlNode(Node):
                 PoseWithCovarianceStamped,
                 robot.initial_pose_topic,
                 10,
+            )
+            for robot in ROBOTS
+        }
+        self.drive_mode_publishers = {
+            robot.name: self.create_publisher(
+                String, robot.drive_mode_request_topic, 10,
+            )
+            for robot in ROBOTS
+        }
+        self.lane_finish_publishers = {
+            robot.name: self.create_publisher(
+                Bool, robot.lane_finish_topic, 10,
             )
             for robot in ROBOTS
         }
@@ -165,6 +197,17 @@ class FleetControlNode(Node):
             )
             for robot in ROBOTS
         ]
+        self.drive_mode_subscriptions = [
+            self.create_subscription(
+                String,
+                robot.drive_mode_status_topic,
+                lambda message, name=robot.name: self._drive_mode_callback(
+                    name, message,
+                ),
+                10,
+            )
+            for robot in ROBOTS
+        ]
 
         # The command watchdog stops stale teleoperation. Permit publication
         # is independent and keeps each short-lived gate lease refreshed.
@@ -202,6 +245,39 @@ class FleetControlNode(Node):
     def publish_stop(self, robot_name: str) -> None:
         """Publish a zero velocity command to one robot."""
         self.command_publishers[robot_name].publish(Twist())
+
+    def request_drive_mode(self, robot_name: str, mode: str) -> None:
+        """Request a robot-local velocity source through the bridged mux."""
+        if robot_name not in ROBOT_BY_NAME:
+            raise ValueError(f'Unknown robot: {robot_name}')
+        requested = str(mode).strip().upper()
+        valid = {'STOP', 'NAV2', 'LANE', 'MANUAL', 'TOGGLE_MANUAL'}
+        if requested not in valid:
+            raise ValueError(f'Unknown drive mode: {mode}')
+        self.drive_mode_publishers[robot_name].publish(String(data=requested))
+        if requested == 'TOGGLE_MANUAL':
+            current = self.requested_drive_modes[robot_name]
+            self.requested_drive_modes[robot_name] = (
+                'NAV2' if current == 'MANUAL' else 'MANUAL'
+            )
+        else:
+            self.requested_drive_modes[robot_name] = requested
+
+    def set_manual_routing(self, robot_name: str, enabled: bool) -> None:
+        """Allow the shared teleop input only for an explicitly manual robot."""
+        if robot_name not in ROBOT_BY_NAME or type(enabled) is not bool:
+            raise ValueError('Invalid manual routing request')
+        self.manual_routing_enabled[robot_name] = enabled
+        if not enabled:
+            self.publish_stop(robot_name)
+
+    def publish_lane_finish(self, robot_name: str) -> None:
+        """Publish a fresh false-to-true lane-finish edge for testing/control."""
+        if robot_name not in ROBOT_BY_NAME:
+            raise ValueError(f'Unknown robot: {robot_name}')
+        publisher = self.lane_finish_publishers[robot_name]
+        publisher.publish(Bool(data=False))
+        publisher.publish(Bool(data=True))
 
     def set_gate_mode(
         self,
@@ -250,6 +326,9 @@ class FleetControlNode(Node):
             message.lease_id = self.gate_lease_ids[robot.name]
             message.allowed_zone_ids = self.gate_allowed_zones[robot.name]
             self.permit_publishers[robot.name].publish(message)
+            self.drive_mode_publishers[robot.name].publish(
+                String(data=self.requested_drive_modes[robot.name]),
+            )
 
     def heartbeat_age(self, robot_name: str) -> Optional[float]:
         """Return seconds since the robot-local gate heartbeat arrived."""
@@ -288,12 +367,19 @@ class FleetControlNode(Node):
         x: float,
         y: float,
         yaw_degrees: float,
+        *,
+        position_variance: float = 0.25,
+        yaw_variance: float = math.radians(15.0) ** 2,
     ) -> PoseWithCovarianceStamped:
         """Publish an editable map-frame initial pose for one robot."""
         if robot_name not in ROBOT_BY_NAME:
             raise ValueError(f'Unknown robot: {robot_name}')
-        if not all(math.isfinite(value) for value in (x, y, yaw_degrees)):
+        if not all(math.isfinite(value) for value in (
+            x, y, yaw_degrees, position_variance, yaw_variance,
+        )):
             raise ValueError('Initial pose values must be finite numbers.')
+        if position_variance <= 0.0 or yaw_variance <= 0.0:
+            raise ValueError('Initial pose variances must be positive.')
 
         orientation_z, orientation_w = yaw_degrees_to_quaternion(yaw_degrees)
         message = PoseWithCovarianceStamped()
@@ -303,9 +389,9 @@ class FleetControlNode(Node):
         message.pose.pose.position.y = y
         message.pose.pose.orientation.z = orientation_z
         message.pose.pose.orientation.w = orientation_w
-        message.pose.covariance[0] = 0.25
-        message.pose.covariance[7] = 0.25
-        message.pose.covariance[35] = math.radians(15.0) ** 2
+        message.pose.covariance[0] = position_variance
+        message.pose.covariance[7] = position_variance
+        message.pose.covariance[35] = yaw_variance
         self.initial_pose_publishers[robot_name].publish(message)
         self.get_logger().info(
             f'Initial pose sent to {robot_name}: x={x:.3f}, y={y:.3f}, '
@@ -325,6 +411,9 @@ class FleetControlNode(Node):
             self.dropped_command_count += 1
             return
         if self.gate_modes[self.selected_robot] != FleetPermit.MODE_RUN:
+            self.dropped_command_count += 1
+            return
+        if not self.manual_routing_enabled[self.selected_robot]:
             self.dropped_command_count += 1
             return
 
@@ -363,6 +452,19 @@ class FleetControlNode(Node):
             return
         self.heartbeats[robot_name] = message
         self.heartbeat_received_at[robot_name] = time.monotonic()
+
+    def _drive_mode_callback(self, robot_name: str, message: String) -> None:
+        try:
+            payload = json.loads(message.data)
+            if payload.get('mode') not in {'STOP', 'NAV2', 'LANE', 'MANUAL'}:
+                raise ValueError('invalid mode')
+        except (ValueError, TypeError, json.JSONDecodeError):
+            self.get_logger().warning(
+                f'Ignored malformed drive mode status from {robot_name}',
+            )
+            return
+        self.drive_mode_status[robot_name] = payload
+        self.drive_mode_received_at[robot_name] = time.monotonic()
 
     def _watchdog(self) -> None:
         if not self.command_active or self.last_command_time is None:

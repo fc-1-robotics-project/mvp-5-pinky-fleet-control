@@ -34,6 +34,8 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'input_cmd_vel_topic': '/cmd_vel',
+                'lane_exit_position_variance': 0.0025,
+                'lane_exit_yaw_variance': 0.0012184696791468343,
                 'command_timeout_sec': 0.5,
                 'permit_ttl_sec': 0.5,
                 'permit_publish_rate_hz': 10.0,

@@ -1,3 +1,5 @@
+> **2026-10-01 현장 버전 팀 공유:** 설치·실행은 [TEAM_LANE_GUIDE.md](TEAM_LANE_GUIDE.md)를 확인하세요.
+
 # Pinky Fleet Control
 
 Pinky Pro 2대를 하나의 관제 PC에서 운영하기 위한 ROS 2 Jazzy 패키지 모음이다.
