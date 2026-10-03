@@ -186,3 +186,39 @@ def test_partial_apply_does_not_save_other_unconfirmed_edits(ui):
     assert 'entry' in saved['A_to_B']
     assert 'exit' not in saved['A_to_B']
     assert_no_command(ui)
+
+
+def _lane_ready(ui, busy=()):
+    ui.lane_navigation = Mock()
+    ui.lane_navigation.telemetry.side_effect = lambda name: dict(
+        fresh=True, active=name in busy)
+    ui.lane_navigation.state.return_value = 'READY'
+    ui.coordinator.requests = {}
+    ui.coordinator.emergency = False
+    ui.coordinator.submit_lane_test.return_value = (True, 'started')
+
+
+def test_one_button_starts_lane_test_on_every_robot(ui):
+    _lane_ready(ui)
+    ui._start_lane_test_all()
+    started = [call.args[0] for call in ui.coordinator.submit_lane_test.call_args_list]
+    assert started == ['robot1', 'robot2']
+    assert ui.field_ready.get() is False
+
+
+def test_all_robot_start_needs_confirmation_and_every_robot_ready(ui):
+    _lane_ready(ui, busy=('robot2',))
+    ui._start_lane_test_all()
+    assert 'robot2' in ui.goal_status.get()
+    ui.field_ready.set(False)
+    ui.lane_navigation.telemetry.side_effect = lambda name: dict(fresh=True, active=False)
+    ui._start_lane_test_all()
+    ui.coordinator.submit_lane_test.assert_not_called()
+
+
+def test_late_refusal_cancels_robots_already_started(ui):
+    _lane_ready(ui)
+    ui.coordinator.submit_lane_test.side_effect = [(True, 'started'), (False, 'heartbeat stale')]
+    ui._start_lane_test_all()
+    ui.coordinator.cancel_robot.assert_called_once_with('robot1')
+    assert ui.field_ready.get() is True

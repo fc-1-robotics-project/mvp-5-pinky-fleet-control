@@ -275,23 +275,33 @@ class MultiBotControlUI:
                 ('test', '차선 단독 테스트', self._start_lane_test, 5, 1),
                 ('finish', '차선 구간 완료', self._publish_lane_finish, 6, 0),
                 ('pause', '일시정지 / 재개', self._pause_selected_mission, 6, 1),
-                ('cancel', '선택 임무 중단', self._cancel_selected_goal, 7, 0)):
+                ('cancel', '선택 임무 중단', self._cancel_selected_goal, 7, 0),
+                ('test_all', '전체 로봇 차선 테스트', self._start_lane_test_all, 7, 1)):
             button = ttk.Button(panel, text=label, command=handler)
             button.grid(row=grid_row, column=column, sticky='ew', padx=2, pady=3)
             self.lane_buttons[key] = button
         ttk.Label(panel, textvariable=self.lane_status, wraplength=360, justify='left').grid(row=8, column=0, columnspan=2, sticky='w', pady=4)
         return row + 1
 
+    def _lane_start_available(self, robot):
+        """Return whether one robot can accept a new lane mission now."""
+        data = self.lane_navigation.telemetry(robot) if robot else {}
+        return bool(robot and data.get('fresh', False) and not data.get('active')
+                    and self.coordinator.requests.get(robot) is None
+                    and not self.coordinator.emergency
+                    and self.lane_navigation.state(robot) != 'CANCELLING')
+
     def _refresh_lane_panel(self):
         robot = self.selected_robot.get()
         data = self.lane_navigation.telemetry(robot) if robot else {}
         request = self.coordinator.requests.get(robot)
         fresh = data.get('fresh', False)
-        available = bool(robot and fresh and not data.get('active') and request is None
-                         and not self.coordinator.emergency
-                         and self.lane_navigation.state(robot) != 'CANCELLING')
+        available = self._lane_start_available(robot)
         for key in ('continuous', 'test'):
             self.lane_buttons[key].configure(state='normal' if available and self.field_ready.get() else 'disabled')
+        all_available = all(self._lane_start_available(item.name) for item in ROBOTS)
+        self.lane_buttons['test_all'].configure(
+            state='normal' if all_available and self.field_ready.get() else 'disabled')
         active_lane = request is not None and request.phase in {'LANE_ACTIVE', 'SAFETY_HOLD'}
         self.lane_buttons['finish'].configure(state='normal' if fresh and active_lane else 'disabled')
         for key in ('pause', 'cancel'):
@@ -834,6 +844,30 @@ class MultiBotControlUI:
         if allowed:
             self.field_ready.set(False)
             self.node.clear_selection()
+
+    def _start_lane_test_all(self) -> None:
+        """Start the lane-only test on every robot, or on none of them."""
+        if not self.field_ready.get():
+            self.goal_status.set('현장 준비 확인이 필요합니다.')
+            return
+        waiting = [robot.name for robot in ROBOTS
+                   if not self._lane_start_available(robot.name)]
+        if waiting:
+            self.goal_status.set(f"시작 실패 · 준비 안 된 로봇: {', '.join(waiting)}")
+            return
+        results = [(robot.name, *self.coordinator.submit_lane_test(
+            robot.name, self.lane_direction.get())) for robot in ROBOTS]
+        failed = [f'{name}: {detail}' for name, allowed, detail in results if not allowed]
+        if failed:
+            # A late refusal must not leave the others driving unattended.
+            for name, allowed, _ in results:
+                if allowed:
+                    self.coordinator.cancel_robot(name)
+            self.goal_status.set('시작 실패 · 전체 취소 · ' + ' / '.join(failed))
+            return
+        self.goal_status.set(f'전체 {len(results)}대 차선 단독 테스트 시작 · 로봇별로 차선 구간 완료')
+        self.field_ready.set(False)
+        self.node.clear_selection()
 
     def _lane_test_request(self, robot_name, request, response):
         """Expose the same supervised test controls to a commissioning terminal."""
