@@ -1,7 +1,10 @@
 """Launch the control UI in the domain-bridge control domain."""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
+from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable, RegisterEventHandler, EmitEvent
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -15,8 +18,14 @@ def generate_launch_description():
         'config',
         'bottleneck_zones.yaml',
     ])
-    return LaunchDescription([
+    actions = [
         SetEnvironmentVariable('ROS_DOMAIN_ID', '22'),
+        DeclareLaunchArgument('start_bridge', default_value='true'),
+        Node(package='domain_bridge', executable='domain_bridge',
+             name='pinky_fleet_bridge', output='screen',
+             arguments=[PathJoinSubstitution([FindPackageShare('multibot_control_ui'),
+                                              'config', 'domain_bridge.yaml'])],
+             condition=IfCondition(LaunchConfiguration('start_bridge'))),
         DeclareLaunchArgument(
             'runtime_zone_robot_radius_m',
             default_value='0.09',
@@ -52,4 +61,12 @@ def generate_launch_description():
                 ),
             }],
         ),
-    ])
+    ]
+    ui = actions[-1]
+    bridge = actions[2]
+    # Stop the launch if either of its essential processes exits.
+    actions[0:0] = [RegisterEventHandler(OnProcessExit(
+        target_action=process,
+        on_exit=[EmitEvent(event=Shutdown(reason=reason))],
+    )) for process, reason in ((ui, 'Control UI exited'), (bridge, 'Fleet bridge exited'))]
+    return LaunchDescription(actions)

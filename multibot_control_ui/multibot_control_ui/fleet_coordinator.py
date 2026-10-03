@@ -30,6 +30,8 @@ class NavigationRequest:
     route_id: str = 'right_lane'
     lane_sent: bool = False
     transition_started: float = 0.0
+    next_goal: Optional[Goal] = None
+    paused: bool = False
     lane_only: bool = False
     lane_duration_sec: float = 300.0
 
@@ -117,7 +119,7 @@ class FleetCoordinator:
         self.manual_robot = None
         self.blocked_robots = {robot.name for robot in ROBOTS}
         for request in self.requests.values():
-            request.phase = 'LANE_FAILED' if request.lane_only else 'E_STOP_HOLD'
+            request.phase = 'LANE_FAILED' if request.lane_only or request.lane_after_arrival else 'E_STOP_HOLD'
             request.delivered = False
         for robot in ROBOTS:
             self.navigation.cancel_goal(robot.name)
@@ -245,6 +247,11 @@ class FleetCoordinator:
         if self.emergency:
             return False, '긴급 정지를 먼저 해제하세요.'
 
+        current = self.requests.get(robot_name)
+        if current is not None and (current.lane_after_arrival or current.lane_only):
+            return False, '진행 중인 차선 임무를 중단한 뒤 새 목표를 지정하세요.'
+        if self.lane_navigation is not None and self.lane_navigation.state(robot_name) == 'CANCELLING':
+            return False, '차선 임무 중단 확인 중입니다.'
         goal = (x, y, yaw_degrees)
         if not all(math.isfinite(value) for value in goal):
             return False, '잘못된 목표 좌표입니다.'
@@ -278,6 +285,7 @@ class FleetCoordinator:
         yaw_degrees: float,
         exit_pose: Goal,
         route_id: str = 'right_lane',
+        next_goal: Optional[Goal] = None,
     ) -> Tuple[bool, str]:
         """Send a Nav2 entry goal that continues as a FollowLane mission."""
         if self.lane_navigation is None:
@@ -285,6 +293,8 @@ class FleetCoordinator:
         if (len(exit_pose) != 3
                 or not all(math.isfinite(value) for value in exit_pose)):
             return False, '잘못된 차선 출구 pose입니다.'
+        if next_goal is not None and (len(next_goal) != 3 or not all(math.isfinite(v) for v in next_goal)):
+            return False, '잘못된 차선 이후 Nav2 목표입니다.'
         if not route_id:
             return False, 'route_id가 비어 있습니다.'
         accepted, detail = self.submit_goal(
@@ -297,7 +307,8 @@ class FleetCoordinator:
         request.lane_exit_pose = tuple(exit_pose)
         request.mission_id = f'{robot_name}-{uuid.uuid4().hex}'
         request.route_id = route_id
-        return True, f'{detail} · 도착 후 우측 차선 주행 예약'
+        request.next_goal = tuple(next_goal) if next_goal is not None else None
+        return True, f'{detail} · {route_id} 차선 연속 임무 예약'
 
     def cancel_robot(
         self,
@@ -326,7 +337,7 @@ class FleetCoordinator:
         self.robot_details[robot_name] = '목표 취소'
         self.node.publish_permits_now()
 
-    def submit_lane_test(self, robot_name: str) -> Tuple[bool, str]:
+    def submit_lane_test(self, robot_name: str, route_id: str = 'lane_test') -> Tuple[bool, str]:
         """Start a supervised lane-only test without Nav2 or a guessed exit pose."""
         if self.emergency:
             return False, '긴급 정지를 먼저 해제하세요.'
@@ -344,7 +355,7 @@ class FleetCoordinator:
         request = NavigationRequest(
             robot_name, (0.0, 0.0, 0.0), phase='LANE_PENDING',
             mission_id=f'{robot_name}-lane-test-{uuid.uuid4().hex}',
-            lane_only=True, lane_duration_sec=900.0,
+            route_id=route_id, lane_only=True, lane_duration_sec=900.0,
         )
         self.requests[robot_name] = request
         self._send_lane_request(request)
@@ -354,6 +365,16 @@ class FleetCoordinator:
             self._apply_motion_policy()
         self.node.publish_permits_now()
         return True, '차선 단독 테스트 · 출구에서 종료 Bool 전송 · 최대 15분'
+
+    def pause_robot(self, robot_name, paused):
+        request = self.requests.get(robot_name)
+        if request is None:
+            return False, '진행 중인 임무가 없습니다.'
+        request.paused = bool(paused)
+        if self.enabled and not self.emergency:
+            self._apply_motion_policy()
+        self.node.publish_permits_now()
+        return True, '임무 일시정지' if paused else '임무 재개'
 
     def tick(self) -> None:
         """Refresh occupancy and velocity permits from actual positions."""
@@ -494,9 +515,13 @@ class FleetCoordinator:
         for robot in ROBOTS:
             name = robot.name
             request = self.requests.get(name)
+            if request is not None and request.paused:
+                self.node.set_gate_mode(name, FleetPermit.MODE_HOLD, reason='OPERATOR_PAUSED')
+                self.robot_details[name] = '일시정지 · 목표 유지'
+                continue
             if request is not None and request.phase in {
                 'LANE_PENDING', 'WAITING_FOR_LANE', 'RELOCALIZING',
-                'LANE_FAILED',
+                'LANE_FAILED', 'LANE_STOPPING',
             } and self.manual_robot != name:
                 self.node.set_gate_mode(
                     name,
@@ -557,7 +582,7 @@ class FleetCoordinator:
             if request is not None:
                 if request.phase in {'LANE_ACTIVE', 'SAFETY_HOLD'}:
                     self.robot_details[name] = (
-                        'RUN · 우측 차선 주행'
+                        'RUN · 차선 주행'
                         if request.phase == 'LANE_ACTIVE'
                         else 'RUN · 차선 안전 정지'
                     )
@@ -587,15 +612,25 @@ class FleetCoordinator:
     def _refresh_navigation_requests(self) -> None:
         """Retry retained goals and discard goals that have completed."""
         for name, request in list(self.requests.items()):
+            if request.paused:
+                continue
             if request.phase in {
                 'LANE_PENDING', 'WAITING_FOR_LANE', 'LANE_ACTIVE',
-                'SAFETY_HOLD', 'RELOCALIZING', 'LANE_FAILED',
+                'SAFETY_HOLD', 'RELOCALIZING', 'LANE_FAILED', 'LANE_STOPPING',
             }:
                 self._refresh_lane_request(name, request)
                 continue
             nav_state = self.navigation.state(name)
             if request.delivered and nav_state == 'SUCCEEDED':
                 if request.lane_after_arrival:
+                    if self.manual_robot == name:
+                        continue
+                    checker = getattr(self.node, 'arrival_is_close', None)
+                    if checker is not None and not checker(name, request.goal):
+                        request.phase = 'LANE_FAILED'
+                        self._request_drive_mode(name, 'STOP')
+                        self.robot_details[name] = '입구 위치/방향 확인 실패 · 재배치 후 재시작'
+                        continue
                     request.phase = 'LANE_PENDING'
                     request.transition_started = time.monotonic()
                     self._request_drive_mode(name, 'STOP')
@@ -634,12 +669,24 @@ class FleetCoordinator:
     ) -> None:
         """Advance lane action, relocalization, and return-to-Nav2 states."""
         if request.phase == 'RELOCALIZING':
-            if (time.monotonic() - request.transition_started >= 1.0
-                    and self.node.pose_is_fresh(name)
-                    and self.manual_robot != name):
-                self._request_drive_mode(name, 'NAV2')
-                self.requests.pop(name, None)
-                self.robot_details[name] = 'RUN · Nav2 준비됨'
+            ready = (self.node.pose_is_fresh(name) and
+                     self.lane_navigation.localization_ready(name, request.transition_started, request.lane_exit_pose))
+            if ready and self.manual_robot != name:
+                if request.next_goal is None:
+                    self._request_drive_mode(name, 'NAV2')
+                    self.requests.pop(name, None)
+                    self.robot_details[name] = '출구 위치 확인 · Nav2 준비됨'
+                else:
+                    request.goal = request.next_goal
+                    request.next_goal = None
+                    request.lane_after_arrival = False
+                    request.phase, request.delivered = 'NAV_PENDING', False
+                    self._request_drive_mode(name, 'NAV2')
+                    self._send_request(request)
+            elif time.monotonic() - request.transition_started > 20.:
+                request.phase = 'LANE_FAILED'
+                self._request_drive_mode(name, 'STOP')
+                self.robot_details[name] = '출구 위치 추정 확인 시간 초과 · STOP'
             return
         if request.phase == 'LANE_FAILED':
             return
@@ -647,6 +694,14 @@ class FleetCoordinator:
             if time.monotonic() - request.last_send_attempt >= 1.0:
                 self._send_lane_request(request)
             return
+        status_reader = getattr(self.lane_navigation, 'telemetry', None)
+        if status_reader is not None and request.lane_sent and time.monotonic() - request.last_send_attempt > 3.:
+            if not status_reader(name).get('fresh'):
+                self.lane_navigation.cancel_goal(name)
+                self._request_drive_mode(name, 'STOP')
+                request.phase = 'LANE_FAILED'
+                self.robot_details[name] = '차선 임무 서버 통신 끊김 · STOP'
+                return
         state = self.lane_navigation.state(name)
         if state == 'WAITING_FOR_LANE' or state == 'PENDING':
             request.phase = 'WAITING_FOR_LANE'
@@ -656,6 +711,9 @@ class FleetCoordinator:
                 self._request_drive_mode(name, 'LANE')
         elif state == 'SAFETY_HOLD':
             request.phase = 'SAFETY_HOLD'
+        elif state in {'STOPPING', 'CANCELLING'}:
+            request.phase = 'LANE_STOPPING'
+            self._request_drive_mode(name, 'STOP')
         elif state == 'SUCCEEDED':
             if request.lane_only:
                 self._request_drive_mode(name, 'STOP')
@@ -671,6 +729,7 @@ class FleetCoordinator:
             self.node.set_gate_mode(
                 name, FleetPermit.MODE_HOLD, reason='LANE_COMPLETE',
             )
+            self.lane_navigation.mark_localization_reset(name)
             self.node.publish_initial_pose(
                 name,
                 *request.lane_exit_pose,
@@ -704,7 +763,7 @@ class FleetCoordinator:
             return 'LANE'
         if request.phase in {
             'LANE_PENDING', 'WAITING_FOR_LANE', 'RELOCALIZING',
-            'LANE_FAILED',
+            'LANE_FAILED', 'LANE_STOPPING',
         }:
             return 'STOP'
         return 'NAV2'

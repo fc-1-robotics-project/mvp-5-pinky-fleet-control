@@ -94,6 +94,14 @@ class FakeLaneNavigation:
         self.sent = []
         self.cancelled = []
         self.states = {'robot1': 'READY', 'robot2': 'READY'}
+        self.localized = True
+        self.reset_names = []
+
+    def mark_localization_reset(self, robot_name):
+        self.reset_names.append(robot_name)
+
+    def localization_ready(self, robot_name, after, target):
+        return self.localized
 
     def send_goal(self, robot_name, mission_id, route_id, **kwargs):
         self.sent.append((robot_name, mission_id, route_id))
@@ -505,3 +513,97 @@ def test_lane_test_estop_requires_explicit_cancel_and_restart() -> None:
     assert navigation.sent == []
     coordinator.cancel_robot('robot1')
     assert coordinator.submit_lane_test('robot1')[0]
+
+
+def test_continuous_mission_requires_localization_before_next_nav_goal():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    assert c.submit_lane_entry_goal('robot1', 1., 2., 90., (3., 4., -90.),
+                                    route_id='B_to_A', next_goal=(5., 6., 0.))[0]
+    nav.states['robot1'] = 'SUCCEEDED'
+    c.tick()
+    lane.states['robot1'] = 'FOLLOWING'
+    c.tick()
+    lane.localized = False
+    lane.states['robot1'] = 'SUCCEEDED'
+    c.tick()
+    assert len(nav.sent) == 1
+    assert c.requests['robot1'].phase == 'RELOCALIZING'
+    c.tick()
+    assert len(nav.sent) == 1
+    lane.localized = True
+    c.tick()
+    assert nav.sent[-1] == ('robot1', 5., 6., 0.)
+    assert not c.requests['robot1'].lane_after_arrival
+
+
+def test_localization_timeout_never_dispatches_next_goal():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    c.submit_lane_entry_goal('robot1', 1., 2., 90., (3., 4., 0.), next_goal=(5., 6., 0.))
+    nav.states['robot1'] = 'SUCCEEDED'
+    c.tick()
+    lane.localized = False
+    lane.states['robot1'] = 'SUCCEEDED'
+    c.tick()
+    c.requests['robot1'].transition_started -= 21.
+    c.tick()
+    assert c.requests['robot1'].phase == 'LANE_FAILED'
+    assert len(nav.sent) == 1
+    assert node.drive_modes['robot1'] == 'STOP'
+
+
+def test_operator_pause_preserves_lane_and_does_not_reissue_nav():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    c.submit_lane_test('robot1')
+    lane.states['robot1'] = 'FOLLOWING'
+    c.tick()
+    c.pause_robot('robot1', True)
+    c.tick()
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    c.pause_robot('robot1', False)
+    c.tick()
+    assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
+    assert not nav.sent
+
+
+def test_estop_during_continuous_lane_requires_explicit_new_mission():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    c.submit_lane_entry_goal('robot1', 1., 2., 90., (3., 4., 0.), next_goal=(5., 6., 0.))
+    nav.states['robot1'] = 'SUCCEEDED'
+    c.tick()
+    lane.states['robot1'] = 'FOLLOWING'
+    c.tick()
+    c.emergency_stop()
+    c.start()
+    c.tick()
+    assert c.requests['robot1'].phase == 'LANE_FAILED'
+    assert len(nav.sent) == 1
+    assert not c.submit_goal('robot1', 9., 9., 0.)[0]
+
+
+def test_stopping_lane_cannot_be_reactivated_by_feedback():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    c.submit_lane_test('robot1')
+    lane.states['robot1'] = 'STOPPING'
+    c.tick()
+    assert c.requests['robot1'].phase == 'LANE_STOPPING'
+    assert node.drive_modes['robot1'] == 'STOP'
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+
+
+def test_selected_resume_does_not_override_global_pause_or_estop():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    c.submit_lane_test('robot1')
+    lane.states['robot1'] = 'FOLLOWING'
+    c.tick()
+    c.pause()
+    c.pause_robot('robot1', False)
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    c.emergency_stop()
+    c.pause_robot('robot1', False)
+    assert node.modes['robot1'][0] == FleetPermit.MODE_ESTOP

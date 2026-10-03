@@ -347,6 +347,16 @@ class FleetControlNode(Node):
         age = self.pose_age(robot_name)
         return age is not None and age <= self.pose_stale_sec
 
+    def arrival_is_close(self, robot_name, goal):
+        if not self.pose_is_fresh(robot_name):
+            return False
+        pose = self.poses[robot_name].pose.pose
+        q = pose.orientation
+        yaw = math.atan2(2*(q.w*q.z + q.x*q.y), 1-2*(q.y*q.y + q.z*q.z))
+        difference = yaw - math.radians(goal[2])
+        return (math.hypot(pose.position.x-goal[0], pose.position.y-goal[1]) <= .15
+                and abs(math.atan2(math.sin(difference), math.cos(difference))) <= math.radians(20))
+
     def robot_position(self, robot_name: str):
         """Return the current map-frame x/y position, when available."""
         message = self.poses.get(robot_name)
