@@ -176,9 +176,10 @@ class RobotLaneClient:
             return self._status
 
     def shutdown(self) -> None:
-        self.cancel_goal()
+        if self.context.ok():
+            self.cancel_goal()
         deadline = time.monotonic() + 2.
-        while self.state() == 'CANCELLING' and time.monotonic() < deadline:
+        while self.context.ok() and self.state() == 'CANCELLING' and time.monotonic() < deadline:
             time.sleep(.02)
         self.executor.shutdown(timeout_sec=1.0)
         self.thread.join(timeout=1.0)

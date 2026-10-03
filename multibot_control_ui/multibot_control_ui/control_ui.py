@@ -2,6 +2,7 @@
 
 import math
 import hashlib
+import signal
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -109,6 +110,7 @@ class MultiBotControlUI:
         self.map_geometry: Optional[Tuple[float, float, float]] = None
         self.map_display = (0.0, 0.0, 1.0)
         self.closing = False
+        self.shutdown_requested = False
 
         self._build_ui()
         self.lane_test_services = [
@@ -1006,11 +1008,17 @@ class MultiBotControlUI:
     def _poll_ros(self) -> None:
         if self.closing:
             return
+        if self.shutdown_requested or not rclpy.ok():
+            self._on_close()
+            return
         rclpy.spin_once(self.node, timeout_sec=0.0)
         self.root.after(ROS_POLL_INTERVAL_MS, self._poll_ros)
 
     def _refresh_ui(self) -> None:
         if self.closing:
+            return
+        if self.shutdown_requested or not rclpy.ok():
+            self._on_close()
             return
 
         self.coordinator.tick()
@@ -1317,9 +1325,12 @@ class MultiBotControlUI:
             self._scale_map_to_canvas()
 
     def _on_close(self) -> None:
+        if self.closing:
+            return
         self.closing = True
-        self.coordinator.emergency_stop('UI_CLOSED')
-        self.node.stop_all()
+        if rclpy.ok():
+            self.coordinator.emergency_stop('UI_CLOSED')
+            self.node.stop_all()
         self.root.destroy()
 
     def run(self) -> None:
@@ -1340,10 +1351,16 @@ def main(args=None) -> None:
         node, navigation, zones, lane_navigation=lane_navigation,
     )
     ui = None
+    previous_signals = {}
     try:
         ui = MultiBotControlUI(
             node, navigation, coordinator, lane_navigation,
         )
+        # Let Tk's next poll stop the robots before shutting down ROS contexts.
+        # A signal handler must not publish or acquire client locks directly.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_signals[signum] = signal.signal(
+                signum, lambda *_: setattr(ui, 'shutdown_requested', True))
         ui.run()
     except KeyboardInterrupt:
         if ui is not None and rclpy.ok():
@@ -1356,6 +1373,8 @@ def main(args=None) -> None:
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        for signum, handler in previous_signals.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == '__main__':
