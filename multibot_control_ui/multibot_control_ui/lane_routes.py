@@ -8,22 +8,32 @@ DIRECTIONS = ('A_to_B', 'B_to_A')
 POSES = ('entry', 'exit', 'next')
 
 
+def validate_pose(values, field):
+    """Validate one explicitly entered position and heading."""
+    if not isinstance(values, (list, tuple)) or len(values) != 3:
+        raise ValueError(f'{field}: x, y, yaw 입력이 필요합니다.')
+    if any(isinstance(v, bool) for v in values):
+        raise ValueError('좌표는 유한한 숫자여야 합니다.')
+    try:
+        values = tuple(float(v) for v in values)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f'{field}: 좌표 입력을 확인하세요.') from error
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError('좌표는 유한한 숫자여야 합니다.')
+    return values
+
+
 def validate_route(route):
-    result = {}
-    for field in POSES:
-        values = route.get(field)
-        if not isinstance(values, (list, tuple)) or len(values) != 3:
-            raise ValueError(f'{field}: x, y, yaw 입력이 필요합니다.')
-        if any(isinstance(v, bool) for v in values):
-            raise ValueError('좌표는 유한한 숫자여야 합니다.')
-        try:
-            values = tuple(float(v) for v in values)
-        except (TypeError, ValueError) as error:
-            raise ValueError(f'{field}: 좌표 입력을 확인하세요.') from error
-        if not all(math.isfinite(v) for v in values):
-            raise ValueError('좌표는 유한한 숫자여야 합니다.')
-        result[field] = values
-    return result
+    """A mission still requires all three poses, including partially saved routes."""
+    return {field: validate_pose(route.get(field), field) for field in POSES}
+
+
+def _saved_route(route):
+    """Allow individual pose saves without inventing the unfinished coordinates."""
+    if not isinstance(route, dict) or not any(field in route for field in POSES):
+        raise ValueError('저장할 경로 좌표가 없습니다.')
+    return dict({field: validate_pose(route[field], field)
+                 for field in POSES if field in route}, map_key=route.get('map_key', ''))
 
 
 def load_routes(path):
@@ -40,7 +50,7 @@ def load_routes(path):
     for direction, item in routes.items():
         if direction not in DIRECTIONS or not isinstance(item, dict):
             raise ValueError('잘못된 차선 방향 설정입니다.')
-        result[direction] = dict(validate_route(item), map_key=item.get('map_key', ''))
+        result[direction] = _saved_route(item)
     return result
 
 
@@ -50,7 +60,7 @@ def save_routes(path, routes):
     for direction, item in routes.items():
         if direction not in DIRECTIONS:
             raise ValueError('잘못된 차선 방향입니다.')
-        checked[direction] = dict(validate_route(item), map_key=item.get('map_key', ''))
+        checked[direction] = _saved_route(item)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(dict(version=1, routes=checked), indent=2, allow_nan=False) + '\n')

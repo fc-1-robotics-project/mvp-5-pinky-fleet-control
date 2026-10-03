@@ -22,3 +22,21 @@ def test_roundtrip_two_independent_directions(tmp_path):
 def test_invalid_pose_rejected(value):
     with pytest.raises(ValueError):
         validate_route(dict(entry=[0,0,value], exit=[1,1,0], next=[2,2,0]))
+
+
+def test_partial_pose_roundtrip_still_requires_complete_mission(tmp_path):
+    path = tmp_path / 'routes.json'
+    save_routes(path, {'A_to_B': {'entry': [1, 2, 90], 'map_key': 'map-a'}})
+    loaded = load_routes(path)
+    assert loaded == {'A_to_B': {'entry': (1, 2, 90), 'map_key': 'map-a'}}
+    with pytest.raises(ValueError, match='exit'):
+        validate_route(loaded['A_to_B'])
+
+
+def test_invalid_partial_save_preserves_existing_file(tmp_path):
+    path = tmp_path / 'routes.json'
+    save_routes(path, {'A_to_B': {'entry': [1, 2, 90]}})
+    before = path.read_bytes()
+    with pytest.raises(ValueError):
+        save_routes(path, {'A_to_B': {'entry': [1, 2, float('nan')]}})
+    assert path.read_bytes() == before
