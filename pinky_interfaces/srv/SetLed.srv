@@ -1,0 +1,8 @@
+string command
+int32[] pixels
+int32 r
+int32 g
+int32 b
+---
+bool success
+string message

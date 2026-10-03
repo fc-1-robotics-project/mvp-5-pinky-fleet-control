@@ -59,7 +59,7 @@ topics:
     type: geometry_msgs/msg/Twist
     from_domain: 22
     to_domain: 21
-    remap: /cmd_vel_candidate
+    remap: /cmd_vel_manual_candidate
     qos:
       reliability: reliable
       durability: volatile
@@ -70,7 +70,7 @@ topics:
     type: geometry_msgs/msg/Twist
     from_domain: 22
     to_domain: 19
-    remap: /cmd_vel_candidate
+    remap: /cmd_vel_manual_candidate
     qos:
       reliability: reliable
       durability: volatile
@@ -145,3 +145,51 @@ topics:
       durability: volatile
       history: keep_last
       depth: 10
+
+  # The control PC requests only a drive source; the robot-local mux remains
+  # the sole source selector before the fleet velocity gate.
+  /robot1/drive/mode_request:
+    type: std_msgs/msg/String
+    from_domain: 22
+    to_domain: 21
+    remap: /drive/mode_request
+  /robot2/drive/mode_request:
+    type: std_msgs/msg/String
+    from_domain: 22
+    to_domain: 19
+    remap: /drive/mode_request
+
+  /drive/mode_status:
+    type: std_msgs/msg/String
+    from_domain: 21
+    to_domain: 22
+    remap: /robot1/drive/mode_status
+  /drive/mode_status:
+    type: std_msgs/msg/String
+    from_domain: 19
+    to_domain: 22
+    remap: /robot2/drive/mode_status
+
+  # Temporary explicit lane-end input. A future detector may publish the same
+  # Bool locally without changing the FollowLane action contract.
+  /robot1/lane/finish:
+    type: std_msgs/msg/Bool
+    from_domain: 22
+    to_domain: 21
+    remap: /lane/finish
+  /robot2/lane/finish:
+    type: std_msgs/msg/Bool
+    from_domain: 22
+    to_domain: 19
+    remap: /lane/finish
+
+  /lane/completed:
+    type: std_msgs/msg/Bool
+    from_domain: 21
+    to_domain: 22
+    remap: /robot1/lane/completed
+  /lane/completed:
+    type: std_msgs/msg/Bool
+    from_domain: 19
+    to_domain: 22
+    remap: /robot2/lane/completed

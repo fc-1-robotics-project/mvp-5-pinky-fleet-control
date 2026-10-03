@@ -1,0 +1,17 @@
+# Start one robot-local lane-following segment.
+string mission_id
+string route_id
+float32 detection_timeout_sec
+float32 max_duration_sec
+---
+uint8 RESULT_SUCCESS=0
+uint8 RESULT_CANCELLED=1
+uint8 RESULT_LANE_NOT_READY=2
+uint8 RESULT_TIMEOUT=3
+uint8 RESULT_FAULT=4
+uint8 code
+string message
+---
+string state
+bool lane_ready
+string detail
