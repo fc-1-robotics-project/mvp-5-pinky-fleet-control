@@ -26,7 +26,9 @@ class DemoPanel:
         body.columnconfigure(0, weight=1)
         self.plan = dict(version=1, map_key='', waypoints={'A': [], 'B': []},
                          closed={'A': False, 'B': False})
-        self.status = tk.StringVar(value='지도 좌표를 입력하고 지정하세요. 종료 기준: 7cm / 실제 정지 3초')
+        self.status = tk.StringVar(value='지도 좌표를 입력하고 좌표 반영을 누르세요. 종료 기준: 7cm / 실제 정지 3초')
+        self.fixed_inputs, self.file_buttons = [], []
+        self.pose_buttons, self.capture_buttons, self.pose_inputs, self.queue_buttons = {}, {}, {}, {}
         roles = ttk.Frame(body)
         roles.grid(row=0, column=0, sticky='ew')
         names = [robot.name for robot in ROBOTS]
@@ -35,17 +37,22 @@ class DemoPanel:
             self.robots[role] = tk.StringVar(value=names[index] if index < len(names) else '')
             self.routes[role] = tk.StringVar(value='A_to_B' if role == 'A' else 'B_to_A')
             ttk.Label(roles, text=role + (' (차선 출발)' if role == 'A' else ' (Nav2 출발)')).grid(row=index, column=0)
-            ttk.Combobox(roles, textvariable=self.robots[role], values=names,
-                         state='readonly', width=10).grid(row=index, column=1, padx=5)
-            ttk.Label(roles, text='차선 route_id').grid(row=index, column=2)
-            ttk.Entry(roles, textvariable=self.routes[role], width=14).grid(row=index, column=3)
+            robot_picker = ttk.Combobox(roles, textvariable=self.robots[role], values=names,
+                                        state='readonly', width=10)
+            robot_picker.grid(row=index, column=1, padx=5)
+            ttk.Label(roles, text='차선 경로 이름').grid(row=index, column=2)
+            route_entry = ttk.Entry(roles, textvariable=self.routes[role], width=14)
+            route_entry.grid(row=index, column=3)
+            self.fixed_inputs.extend(((robot_picker, 'readonly'), (route_entry, 'normal')))
         coordinates = ttk.LabelFrame(body, text='고정 좌표 (m / yaw °)', padding=5)
         coordinates.grid(row=1, column=0, sticky='ew', pady=8)
         self.values = {field: [tk.StringVar() for _ in range(3)] for field in (*POSES, 'waypoint')}
         for row, field in enumerate(POSES):
             ttk.Label(coordinates, text=LABELS[field]).grid(row=row, column=0, sticky='w')
             self._pose_row(coordinates, row, field)
-            ttk.Button(coordinates, text='지정', command=lambda f=field: self._run(lambda: self._apply(f))).grid(row=row, column=5)
+            button = ttk.Button(coordinates, text='좌표 반영', command=lambda f=field: self._run(lambda: self._apply(f)))
+            button.grid(row=row, column=5)
+            self.pose_buttons[field] = button
         queue = ttk.LabelFrame(body, text='Nav2 대기 목록 · 각 점 도착 후 다음 점 전송', padding=5)
         queue.grid(row=2, column=0, sticky='nsew')
         body.rowconfigure(2, weight=1)
@@ -58,11 +65,12 @@ class DemoPanel:
         picker.pack(side='left')
         picker.bind('<<ComboboxSelected>>', lambda _: self.refresh(force=True))
         self.closed = tk.BooleanVar(value=False)
-        ttk.Checkbutton(controls, text='이 로봇 Nav2 목록 확정 (빈 목록만으로는 전환 안 함)',
-                        variable=self.closed, command=lambda: self._run(self._close_queue)).pack(side='left', padx=8)
+        self.closed_button = ttk.Checkbutton(controls, text='목록 끝에서 다음 단계 진행',
+                        variable=self.closed, command=lambda: self._run(self._close_queue))
+        self.closed_button.pack(side='left', padx=8)
         self.tree = ttk.Treeview(queue, columns=('state', 'x', 'y', 'yaw'), show='headings', height=6)
         for key in ('state', 'x', 'y', 'yaw'):
-            self.tree.heading(key, text=key)
+            self.tree.heading(key, text={'state': '상태', 'x': 'x (m)', 'y': 'y (m)', 'yaw': '방향 (°)'}[key])
             self.tree.column(key, width=110, stretch=True)
         self.tree.grid(row=1, column=0, sticky='nsew')
         scrollbar = ttk.Scrollbar(queue, orient='vertical', command=self.tree.yview)
@@ -75,13 +83,20 @@ class DemoPanel:
         self._pose_row(edit, 0, 'waypoint')
         actions = ttk.Frame(queue)
         actions.grid(row=3, column=0, sticky='ew')
-        for title, action in [('추가', 'add'), ('선택 수정', 'edit'), ('삭제', 'delete'), ('위', 'up'), ('아래', 'down')]:
-            ttk.Button(actions, text=title, command=lambda a=action: self._run(lambda: self._edit_queue(a))).pack(side='left', padx=2)
+        for title, action in [('대기점 추가', 'add'), ('선택점 수정', 'edit'), ('선택점 삭제', 'delete'), ('위로', 'up'), ('아래로', 'down')]:
+            button = ttk.Button(actions, text=title, command=lambda a=action: self._run(lambda: self._edit_queue(a)))
+            button.pack(side='left', padx=2)
+            self.queue_buttons[action] = button
+        ttk.Label(queue, text='미체크: 목록이 비면 대기 · 체크: A/B 목록을 모두 마치면 다음 단계').grid(
+            row=4, column=0, sticky='w')
         buttons = ttk.Frame(body)
         buttons.grid(row=3, column=0, sticky='ew', pady=8)
         for title, action in [('설정 불러오기', self._load), ('설정 저장', self._save)]:
-            ttk.Button(buttons, text=title, command=lambda a=action: self._run(a)).pack(side='left', padx=3)
-        ttk.Label(body, text='설정 저장 후 메인 UI에서 통합 시연을 시작하세요.').grid(row=4, column=0, sticky='w')
+            button = ttk.Button(buttons, text=title, command=lambda a=action: self._run(a))
+            button.pack(side='left', padx=3)
+            self.file_buttons.append(button)
+        self.edit_hint = tk.StringVar()
+        ttk.Label(body, textvariable=self.edit_hint).grid(row=4, column=0, sticky='w')
         ttk.Label(body, textvariable=self.status, wraplength=720).grid(row=5, column=0, sticky='w', pady=6)
         self._signature = None
         if self.demo.active:
@@ -92,14 +107,19 @@ class DemoPanel:
         self.refresh(force=True)
 
     def _pose_row(self, parent, row, field):
+        self.pose_inputs[field] = []
         for column, variable in enumerate(self.values[field], 1):
-            ttk.Entry(parent, textvariable=variable, width=9).grid(row=row, column=column, padx=2)
-        ttk.Button(parent, text='지도 선택', command=lambda: self.ui._begin_pose_capture('demo', field)).grid(row=row, column=4, padx=3)
+            entry = ttk.Entry(parent, textvariable=variable, width=9)
+            entry.grid(row=row, column=column, padx=2)
+            self.pose_inputs[field].append(entry)
+        button = ttk.Button(parent, text='지도 선택', command=lambda: self.ui._begin_pose_capture('demo', field))
+        button.grid(row=row, column=4, padx=3)
+        self.capture_buttons[field] = button
 
     def capture(self, field, pose):
         for variable, value in zip(self.values[field], pose):
             variable.set(f'{value:.3f}')
-        self.status.set(f'{LABELS[field]} 입력됨 · 지정 또는 waypoint 추가/선택 수정으로 확정하세요.')
+        self.status.set(f'{LABELS[field]} 입력됨 · 좌표 반영 또는 대기점 추가/선택점 수정을 누르세요.')
 
     def _run(self, action):
         try:
@@ -117,7 +137,7 @@ class DemoPanel:
         self.plan[field] = validate_pose([v.get() for v in self.values[field]], field)
         self.plan['map_key'] = key
         self.ui._cancel_map_capture()
-        self.status.set(LABELS[field] + ' 지정 완료')
+        self.status.set(LABELS[field] + ' 반영 완료 · 설정 저장을 눌러 보관하세요.')
 
     def _queues(self):
         return (self.demo.pending, self.demo.closed) if self.demo.active else (self.plan['waypoints'], self.plan['closed'])
@@ -161,9 +181,11 @@ class DemoPanel:
                 updated[index], updated[other] = updated[other], updated[index]
         self._set_pending(updated, closed[role])
         self.ui._cancel_map_capture()
-        self.status.set(f'{role} 대기 목록 변경 완료 · 현재 목표 유지')
+        self.status.set(f'{role} 대기 목록 변경 완료 · ' +
+                        ('현재 실행에 즉시 반영 (파일 저장 안 됨)' if self.demo.active else '설정 저장 필요'))
 
     def _select_waypoint(self, _event):
+        self._refresh_controls()
         selected = self.tree.selection()
         if selected and selected[0].startswith('pending:'):
             pose = self._queues()[0][self.role.get()][int(selected[0].split(':')[1])]
@@ -179,6 +201,10 @@ class DemoPanel:
     def _save(self):
         if self.demo.active:
             raise ValueError('시연 중 설정 저장은 중단 후 가능합니다.')
+        for field in POSES:
+            entered = validate_pose([v.get() for v in self.values[field]], field)
+            if entered != self.plan.get(field):
+                raise ValueError(f'{LABELS[field]}: 좌표 반영 후 저장하세요.')
         save_plan(self.path, self._configuration())
         self.ui._refresh_demo_configuration()
         self.status.set('설정 저장 완료 · 메인 UI에서 현장 확인 후 통합 시연 시작')
@@ -192,10 +218,40 @@ class DemoPanel:
 
     def _fill_configuration(self):
         for field in POSES:
-            self.capture(field, self.plan[field])
+            for variable, value in zip(self.values[field], self.plan[field]):
+                variable.set(str(value))
         for role in ('A', 'B'):
             self.robots[role].set(self.plan[role.lower()])
             self.routes[role].set(self.plan[role.lower() + '_route'])
+
+    def _refresh_controls(self):
+        fixed_state = 'disabled' if self.demo.active else 'normal'
+        for widget, state in self.fixed_inputs:
+            widget.configure(state='disabled' if self.demo.active else state)
+        for button in (*self.pose_buttons.values(), *self.file_buttons):
+            button.configure(state=fixed_state)
+        role = self.role.get()
+        editable = (not self.demo.active or
+                    (self.demo.stage in {'A_LANE', 'NAV_ROUTES'} and role not in self.demo.route_done))
+        for field, entries in self.pose_inputs.items():
+            enabled = editable if field == 'waypoint' else not self.demo.active
+            for entry in entries:
+                entry.configure(state='normal' if enabled else 'disabled')
+            self.capture_buttons[field].configure(
+                state='normal' if enabled and self.ui.node.latest_map is not None else 'disabled')
+        selected = self.tree.selection()
+        index = int(selected[0].split(':')[1]) if selected and selected[0].startswith('pending:') else None
+        count = len(self._queues()[0][role])
+        for action, button in self.queue_buttons.items():
+            enabled = editable and (action == 'add' or index is not None)
+            if action == 'up':
+                enabled = enabled and index > 0
+            elif action == 'down':
+                enabled = enabled and index < count - 1
+            button.configure(state='normal' if enabled else 'disabled')
+        self.closed_button.configure(state='normal' if editable else 'disabled')
+        self.edit_hint.set('주행 중 대기점 편집은 현재 실행에 즉시 반영됩니다. 파일에는 저장하지 않습니다.'
+                           if self.demo.active else '좌표 반영 → 설정 저장 → 메인 UI에서 통합 시연 시작')
 
     def refresh(self, force=False):
         role = self.role.get()
@@ -219,3 +275,4 @@ class DemoPanel:
                 self.tree.selection_set(selected[0])
             self.closed.set(closed[role])
             self._signature = signature
+        self._refresh_controls()

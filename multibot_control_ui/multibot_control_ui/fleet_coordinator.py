@@ -100,6 +100,8 @@ class FleetCoordinator:
 
     def pause(self) -> None:
         """Hold every robot without discarding its current Nav2 goal."""
+        if self.emergency:
+            return  # HOLD must never release a latched emergency stop.
         self.enabled = False
         self.emergency = False
         self.blocked_robots = {robot.name for robot in ROBOTS}
@@ -138,6 +140,8 @@ class FleetCoordinator:
         for runtime in self.zones.values():
             runtime.state = 'LOCKED'
             runtime.detail = reason
+        if self.sequence is not None and self.sequence.active:
+            self.sequence.cancel('비상정지로 통합 시연 종료 · 새로 시작 필요', failed=True)
         retained = len(self.requests)
         self.summary = f'긴급 정지 · {reason} · 저장 목표 {retained}개 유지'
         self.node.publish_permits_now()
@@ -347,10 +351,10 @@ class FleetCoordinator:
         else:
             self.node.set_gate_mode(
                 robot_name,
-                FleetPermit.MODE_HOLD,
-                reason='GOAL_CANCELLED',
+                FleetPermit.MODE_ESTOP if self.emergency else FleetPermit.MODE_HOLD,
+                reason='ESTOP_GOAL_CANCELLED' if self.emergency else 'GOAL_CANCELLED',
             )
-        self.robot_details[robot_name] = '목표 취소'
+        self.robot_details[robot_name] = 'E-STOP · 목표 취소' if self.emergency else '목표 취소'
         self.node.publish_permits_now()
 
     def submit_lane_test(self, robot_name: str, route_id: str = 'lane_test', *, _owner=None) -> Tuple[bool, str]:

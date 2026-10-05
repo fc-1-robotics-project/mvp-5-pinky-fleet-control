@@ -166,8 +166,7 @@ class TwoRobotDemo:
             self._hold(self.plan[role.lower()], self.stage)
         for role in ('A', 'B'):
             name = self.plan[role.lower()]
-            if not self.fleet.emergency:
-                self.fleet.cancel_robot(name, _owner=self)
+            self.fleet.cancel_robot(name, _owner=self)
         if not self.fleet.emergency:
             self.fleet.pause()
 

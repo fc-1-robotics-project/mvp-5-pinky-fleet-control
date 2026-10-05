@@ -31,7 +31,7 @@ def ui(tmp_path):
                              origin='rotated-map'),
         data=[0] * 10000,
     )
-    app.coordinator = Mock(enabled=False)
+    app.coordinator = Mock(enabled=False, emergency=False, requests={}, manual_robot=None)
     app.coordinator.submit_goal.return_value = (True, 'goal sent')
     app.canvas = Mock()
     app.capture_cancel_button = Mock()

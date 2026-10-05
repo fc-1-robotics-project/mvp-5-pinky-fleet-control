@@ -607,3 +607,24 @@ def test_selected_resume_does_not_override_global_pause_or_estop():
     c.emergency_stop()
     c.pause_robot('robot1', False)
     assert node.modes['robot1'][0] == FleetPermit.MODE_ESTOP
+
+
+def test_pause_and_cancel_cannot_release_emergency_stop():
+    coordinator, node, navigation = make_coordinator()
+    assert coordinator.submit_goal('robot1', 2., .25, 0.)[0]
+    assert coordinator.submit_goal('robot2', -1., .25, 180.)[0]
+    coordinator.emergency_stop()
+    sent = list(navigation.sent)
+    coordinator.pause()
+    coordinator.cancel_robot('robot1')
+    coordinator.tick()
+    assert coordinator.emergency and not coordinator.enabled
+    assert all(value[0] == FleetPermit.MODE_ESTOP for value in node.modes.values())
+    assert navigation.sent == sent
+    assert 'robot1' not in coordinator.requests
+    assert coordinator.requests['robot2'].phase == 'E_STOP_HOLD'
+    # Explicit RUN still resumes retained independent Nav2 goals.
+    coordinator.start()
+    assert not coordinator.emergency
+    assert len(navigation.sent) == len(sent) + 1
+    assert navigation.sent[-1][0] == 'robot2'

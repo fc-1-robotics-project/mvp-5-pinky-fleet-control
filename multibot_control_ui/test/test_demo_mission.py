@@ -284,3 +284,19 @@ def test_stale_waiting_robot_pose_does_not_start_either_nav_route(scene):
     f.tick()
     assert demo.stage == 'FAILED'
     assert not nav.sent and not f.enabled
+
+
+def test_estop_terminates_demo_immediately_before_any_ui_tick(scene):
+    fleet, demo, node, nav, lane, _ = scene
+    finish_lane(scene, 'A')
+    sent = list(nav.sent)
+    fleet.emergency_stop()
+    assert not demo.active and demo.stage == 'FAILED'
+    assert not fleet.requests
+    assert all(value[0] == FleetPermit.MODE_ESTOP for value in node.modes.values())
+    # Clicking RUN before a periodic tick must not continue the old demo.
+    fleet.start()
+    fleet.tick()
+    assert nav.sent == sent
+    assert not demo.active
+    assert all(value[0] == FleetPermit.MODE_HOLD for value in node.modes.values())
