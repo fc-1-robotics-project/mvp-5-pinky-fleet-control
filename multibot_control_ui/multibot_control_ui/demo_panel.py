@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 import json
-from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
@@ -18,9 +17,9 @@ LABELS = {'a_exit': 'A 차선 끝 / Nav2 합류', 'a_final': 'A Nav2 최종 목�
 class DemoPanel:
     def __init__(self, ui):
         self.ui, self.demo = ui, ui.demo
-        self.path = Path.home() / '.config/pinky_fleet_control/two_robot_demo.json'
+        self.path = ui.demo_path
         self.window = tk.Toplevel(ui.root)
-        self.window.title('두 로봇 통합 시연')
+        self.window.title('통합 시연 설정')
         self.window.minsize(760, 620)
         body = ttk.Frame(self.window, padding=10)
         body.pack(fill='both', expand=True)
@@ -80,15 +79,10 @@ class DemoPanel:
             ttk.Button(actions, text=title, command=lambda a=action: self._run(lambda: self._edit_queue(a))).pack(side='left', padx=2)
         buttons = ttk.Frame(body)
         buttons.grid(row=3, column=0, sticky='ew', pady=8)
-        for title, action in [('설정 불러오기', self._load), ('설정 저장', self._save),
-                              ('통합 시연 시작', self._start), ('시연 중단', self.demo.cancel)]:
+        for title, action in [('설정 불러오기', self._load), ('설정 저장', self._save)]:
             ttk.Button(buttons, text=title, command=lambda a=action: self._run(a)).pack(side='left', padx=3)
-        self.ready = tk.BooleanVar(value=False)
-        ttk.Checkbutton(body, text='두 로봇 배치·코스 확인·현장 감시·즉시 정지 가능', variable=self.ready).grid(row=4, column=0, sticky='w')
-        ttk.Label(body, text='일시정지/재개·긴급 정지·수동 차선 완료는 관제 본창의 기존 버튼을 사용합니다.').grid(row=5, column=0, sticky='w')
-        ttk.Label(body, textvariable=self.status, wraplength=720).grid(row=6, column=0, sticky='w', pady=6)
-        self.progress = tk.StringVar()
-        ttk.Label(body, textvariable=self.progress, wraplength=720).grid(row=7, column=0, sticky='w')
+        ttk.Label(body, text='설정 저장 후 메인 UI에서 통합 시연을 시작하세요.').grid(row=4, column=0, sticky='w')
+        ttk.Label(body, textvariable=self.status, wraplength=720).grid(row=5, column=0, sticky='w', pady=6)
         self._signature = None
         if self.demo.active:
             self.plan = deepcopy(self.demo.plan)
@@ -186,7 +180,8 @@ class DemoPanel:
         if self.demo.active:
             raise ValueError('시연 중 설정 저장은 중단 후 가능합니다.')
         save_plan(self.path, self._configuration())
-        self.status.set(f'설정 저장: {self.path}')
+        self.ui._refresh_demo_configuration()
+        self.status.set('설정 저장 완료 · 메인 UI에서 현장 확인 후 통합 시연 시작')
 
     def _load(self):
         if self.demo.active:
@@ -201,13 +196,6 @@ class DemoPanel:
         for role in ('A', 'B'):
             self.robots[role].set(self.plan[role.lower()])
             self.routes[role].set(self.plan[role.lower() + '_route'])
-
-    def _start(self):
-        if not self.ready.get():
-            raise ValueError('두 로봇 현장 확인 체크 후 시작하세요.')
-        self.demo.start(self._configuration(), self.ui._map_key())
-        self.ready.set(False)
-        self.status.set(self.demo.detail)
 
     def refresh(self, force=False):
         role = self.role.get()
@@ -231,4 +219,3 @@ class DemoPanel:
                 self.tree.selection_set(selected[0])
             self.closed.set(closed[role])
             self._signature = signature
-        self.progress.set(f'{self.demo.stage} · {self.demo.detail}')

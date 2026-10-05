@@ -2,6 +2,7 @@
 
 import math
 import hashlib
+import json
 import signal
 from pathlib import Path
 import tkinter as tk
@@ -14,7 +15,7 @@ from vision_control.lane_client import FleetLaneClients
 
 from .control_node import create_node, FleetControlNode
 from .fleet_coordinator import FleetCoordinator
-from .demo_mission import TwoRobotDemo
+from .demo_mission import TwoRobotDemo, validate_plan
 from .demo_panel import DemoPanel, LABELS as DEMO_LABELS
 from .map_math import grid_to_world, occupancy_color, quaternion_to_yaw
 from .map_math import world_to_grid
@@ -56,6 +57,15 @@ class MultiBotControlUI:
         self.root.minsize(1180, 740)
         self.root.configure(background='#0b1220')
         self._configure_styles()
+
+        self.demo_path = Path.home() / '.config/pinky_fleet_control/two_robot_demo.json'
+        self.demo_ready = tk.BooleanVar(value=False)
+        self.demo_config_status = tk.StringVar()
+        self.demo_status = tk.StringVar()
+        self.demo_config_valid = False
+        self.demo_error = ''
+        self.demo_buttons = {}
+        self._refresh_demo_configuration()
 
         self.selected_robot = tk.StringVar(value='')
         self.routing_status = tk.StringVar(
@@ -132,10 +142,101 @@ class MultiBotControlUI:
         self.root.after(UI_REFRESH_INTERVAL_MS, self._refresh_ui)
 
     def _open_demo_panel(self):
+        self._refresh_demo_configuration()
         if self.demo_panel is None or not self.demo_panel.window.winfo_exists():
             self.demo_panel = DemoPanel(self)
         else:
             self.demo_panel.window.lift()
+
+    def _read_demo_configuration(self):
+        return validate_plan(json.loads(self.demo_path.read_text()))
+
+    def _refresh_demo_configuration(self):
+        self.demo_ready.set(False)
+        self.demo_config_valid = False
+        try:
+            plan = self._read_demo_configuration()
+        except FileNotFoundError:
+            self.demo_config_status.set('설정 창에서 좌표·waypoint를 저장하세요.')
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            self.demo_config_status.set(f'설정 확인 필요 · {error}')
+        else:
+            self.demo_config_valid = True
+            self.demo_config_status.set(
+                f"저장된 설정 · A={plan['a']} / B={plan['b']} · "
+                f"Nav2 waypoint A {len(plan['waypoints']['A'])}개 / B {len(plan['waypoints']['B'])}개")
+        self.demo_error = ''
+
+    def _start_demo(self):
+        try:
+            if not self.demo_ready.get():
+                raise ValueError('두 로봇 현장 확인 체크 후 시작하세요.')
+            # The editor can be closed; only explicitly saved configuration starts a run.
+            self.demo.start(self._read_demo_configuration(), self._map_key())
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            self.demo_error = f'시작 실패 · {error}'
+        else:
+            self.demo_ready.set(False)
+            self.demo_error = ''
+            self._cancel_map_capture()
+            self.node.clear_selection()
+        self._refresh_demo_controls()
+
+    def _pause_demo(self):
+        if not self.demo.active or self.coordinator.emergency:
+            return
+        if self.coordinator.enabled:
+            self.coordinator.pause()
+            self.demo_error = ''
+        else:
+            started, detail = self.coordinator.start()
+            self.demo_error = '' if started else detail
+        self._refresh_demo_controls()
+
+    def _cancel_demo(self):
+        self.demo.cancel()
+        self.demo_ready.set(False)
+        self.demo_error = ''
+        self._refresh_demo_controls()
+
+    def _build_demo_controls(self, controls, row):
+        panel = ttk.LabelFrame(controls, text='두 로봇 통합 시연', padding=8)
+        panel.grid(row=row, column=0, columnspan=2, sticky='ew', pady=8)
+        for column in range(3):
+            panel.columnconfigure(column, weight=1)
+        ttk.Button(panel, text='통합 시연 설정 · waypoint 편집',
+                   command=self._open_demo_panel).grid(row=0, column=0, columnspan=3, sticky='ew')
+        ttk.Label(panel, textvariable=self.demo_config_status, wraplength=480).grid(
+            row=1, column=0, columnspan=3, sticky='w', pady=4)
+        ttk.Label(panel, text='마지막으로 저장한 설정으로 실행합니다.').grid(
+            row=2, column=0, columnspan=3, sticky='w')
+        ttk.Checkbutton(panel, text='두 로봇 배치·코스 확인·현장 감시·즉시 정지 가능',
+                        variable=self.demo_ready, command=self._refresh_demo_controls).grid(
+                            row=3, column=0, columnspan=3, sticky='w', pady=5)
+        for column, (key, label, command) in enumerate((
+                ('start', '통합 시연 시작', self._start_demo),
+                ('pause', '시연 일시정지', self._pause_demo),
+                ('cancel', '시연 중단', self._cancel_demo))):
+            button = ttk.Button(panel, text=label, command=command)
+            button.grid(row=4, column=column, sticky='ew', padx=2, pady=3)
+            self.demo_buttons[key] = button
+        ttk.Label(panel, textvariable=self.demo_status, wraplength=480, justify='left').grid(
+            row=5, column=0, columnspan=3, sticky='w', pady=4)
+        self._refresh_demo_controls()
+        return row + 1
+
+    def _refresh_demo_controls(self):
+        active = self.demo.active
+        self.demo_buttons['start'].configure(state='normal' if (
+            not active and not self.coordinator.emergency
+            and self.demo_config_valid and self.demo_ready.get()) else 'disabled')
+        self.demo_buttons['pause'].configure(
+            text='시연 일시정지' if self.coordinator.enabled else '시연 재개',
+            state='normal' if active and not self.coordinator.emergency else 'disabled')
+        self.demo_buttons['cancel'].configure(state='normal' if active else 'disabled')
+        prefix = '일시정지 · ' if active and not self.coordinator.enabled else ''
+        detail = f'{prefix}{self.demo.stage} · {self.demo.detail}'
+        self.demo_status.set(detail + ('\n' + self.demo_error if self.demo_error else ''))
 
     def _load_route_fields(self, _event=None):
         route = self.routes.get(self.lane_direction.get(), {})
@@ -442,9 +543,7 @@ class MultiBotControlUI:
         self.root.bind('<Escape>', self._cancel_map_capture)
 
         next_row = self._build_robot_selection_panel(controls)
-        ttk.Button(controls, text='두 로봇 통합 시연 · waypoint 설정',
-                   command=self._open_demo_panel).grid(row=next_row, column=0, columnspan=2, sticky='ew', pady=5)
-        next_row += 1
+        next_row = self._build_demo_controls(controls, next_row)
         next_row = self._build_lane_panel(controls, next_row)
         next_row = self._build_initial_pose_panel(controls, next_row)
         next_row = self._build_navigation_panel(controls, next_row)
@@ -1167,6 +1266,7 @@ class MultiBotControlUI:
         self.coordinator.tick()
         if self.demo_panel is not None and self.demo_panel.window.winfo_exists():
             self.demo_panel.refresh()
+        self._refresh_demo_controls()
         self._refresh_lane_panel()
         if self.node.map_generation != self.rendered_map_generation:
             self._render_map()
