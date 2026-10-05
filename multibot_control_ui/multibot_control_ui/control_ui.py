@@ -258,40 +258,26 @@ class MultiBotControlUI:
         self.goal_status.set(detail)
 
     def _build_lane_panel(self, controls, row):
-        panel = ttk.LabelFrame(controls, text='차선 / Nav2 연속 임무', padding=8)
+        panel = ttk.LabelFrame(controls, text='차선 테스트 / 임무 제어', padding=8)
         panel.grid(row=row, column=0, columnspan=2, sticky='ew', pady=8)
         panel.columnconfigure(0, weight=1)
+        panel.columnconfigure(1, weight=1)
         picker = ttk.Combobox(panel, textvariable=self.lane_direction,
                               values=DIRECTIONS, state='readonly', width=12)
         picker.grid(row=0, column=0, sticky='w')
-        picker.bind('<<ComboboxSelected>>', self._load_route_fields)
-        ttk.Label(panel, text='양방향 모두 전진 주행').grid(row=0, column=1, sticky='w')
-        table = ttk.Frame(panel)
-        table.grid(row=1, column=0, columnspan=2, sticky='ew', pady=4)
-        for column, label in enumerate(('좌표', 'x (m)', 'y (m)', '방향 (°)')):
-            ttk.Label(table, text=label).grid(row=0, column=column, padx=2)
-        for index, (field, label) in enumerate(zip(POSES, ('입구', '출구', '다음 목표')), 1):
-            ttk.Label(table, text=label).grid(row=index, column=0, sticky='w')
-            for column, variable in enumerate(self.route_values[field], 1):
-                ttk.Entry(table, textvariable=variable, width=7).grid(row=index, column=column, padx=1)
-            ttk.Button(table, text='지도 선택', width=0,
-                       command=lambda f=field: self._capture_route_pose(f)).grid(row=index, column=4, padx=3)
-            ttk.Button(table, text='지정', width=0,
-                       command=lambda f=field: self._apply_route_pose(f)).grid(row=index, column=5, padx=3)
-        ttk.Button(panel, text='방향별 경로 저장', command=self._save_route).grid(row=2, column=0, columnspan=2, sticky='ew', pady=4)
-        ttk.Label(panel, textvariable=self.route_status, wraplength=360).grid(row=3, column=0, columnspan=2, sticky='w')
-        ttk.Checkbutton(panel, text='현장 감시·즉시 정지 준비 확인', variable=self.field_ready).grid(row=4, column=0, columnspan=2, sticky='w', pady=6)
+        picker.bind('<<ComboboxSelected>>', self._cancel_map_capture)
+        ttk.Label(panel, text='차선 단독 테스트 방향').grid(row=0, column=1, sticky='w')
+        ttk.Checkbutton(panel, text='현장 감시·즉시 정지 준비 확인', variable=self.field_ready).grid(row=1, column=0, columnspan=2, sticky='w', pady=6)
         for key, label, handler, grid_row, column in (
-                ('continuous', '연속 임무 시작', self._start_continuous, 5, 0),
-                ('test', '차선 단독 테스트', self._start_lane_test, 5, 1),
-                ('finish', '차선 구간 완료', self._publish_lane_finish, 6, 0),
-                ('pause', '일시정지 / 재개', self._pause_selected_mission, 6, 1),
-                ('cancel', '선택 임무 중단', self._cancel_selected_goal, 7, 0),
-                ('test_all', '전체 로봇 차선 테스트', self._start_lane_test_all, 7, 1)):
+                ('test', '차선 단독 테스트', self._start_lane_test, 2, 0),
+                ('test_all', '전체 로봇 차선 테스트', self._start_lane_test_all, 2, 1),
+                ('finish', '차선 구간 완료', self._publish_lane_finish, 3, 0),
+                ('pause', '일시정지 / 재개', self._pause_selected_mission, 3, 1),
+                ('cancel', '선택 임무 중단', self._cancel_selected_goal, 4, 0)):
             button = ttk.Button(panel, text=label, command=handler)
             button.grid(row=grid_row, column=column, sticky='ew', padx=2, pady=3)
             self.lane_buttons[key] = button
-        ttk.Label(panel, textvariable=self.lane_status, wraplength=360, justify='left').grid(row=8, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Label(panel, textvariable=self.lane_status, wraplength=360, justify='left').grid(row=5, column=0, columnspan=2, sticky='w', pady=4)
         return row + 1
 
     def _lane_start_available(self, robot):
@@ -308,8 +294,8 @@ class MultiBotControlUI:
         request = self.coordinator.requests.get(robot)
         fresh = data.get('fresh', False)
         available = self._lane_start_available(robot)
-        for key in ('continuous', 'test'):
-            self.lane_buttons[key].configure(state='normal' if available and self.field_ready.get() else 'disabled')
+        self.lane_buttons['test'].configure(
+            state='normal' if available and self.field_ready.get() else 'disabled')
         all_available = all(self._lane_start_available(item.name) for item in ROBOTS)
         self.lane_buttons['test_all'].configure(
             state='normal' if all_available and self.field_ready.get() else 'disabled')
