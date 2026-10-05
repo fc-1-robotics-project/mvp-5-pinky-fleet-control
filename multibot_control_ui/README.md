@@ -55,3 +55,7 @@ robot1=21, robot2=19, 관제=22. 로봇별 `/navigate_to_pose`와 `/follow_lane`
 ## 개발
 
 빌드와 동작 테스트 명령은 [팀 가이드](../TEAM_LANE_GUIDE.md#7-코드-검사검증-범위)에 있습니다. 모듈 관계는 [ARCHITECTURE.md](docs/ARCHITECTURE.md), 실제 명령 경로와 제한은 [CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)를 참고합니다.
+
+## 두 로봇 차선↔Nav2 통합 시연
+
+[설정·waypoint 편집·자동 종료 사용법](docs/TWO_ROBOT_DEMO.md)을 참고하세요.

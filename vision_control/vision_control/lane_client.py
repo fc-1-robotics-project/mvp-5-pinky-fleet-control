@@ -48,9 +48,11 @@ class RobotLaneClient:
         self._mission_status = {}
         self._mission_received = 0.
         self._localization = None
+        self._fleet_localization = None
         self._localization_epoch = (0., 0.)
         self.node.create_subscription(String, '/lane/mission_status', self._mission_callback, 10)
         self.node.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self._localization_callback, qos_profile_sensor_data)
+        self.node.create_subscription(PoseWithCovarianceStamped, '/fleet/pose', self._fleet_localization_callback, qos_profile_sensor_data)
         self.thread.start()
 
     def send_goal(
@@ -127,12 +129,51 @@ class RobotLaneClient:
     def telemetry(self):
         with self.lock:
             result = dict(self._mission_status)
-            result['fresh'] = time.monotonic() - self._mission_received <= 1.5
+            result['received_age_s'] = time.monotonic() - self._mission_received
+            result['fresh'] = result['received_age_s'] <= 1.5
+            exit_status = result.get('exit_status')
+            if isinstance(exit_status, dict) and exit_status.get('version') == 1:
+                stamp = result.get('status_time_s')
+                now = self.node.get_clock().now().nanoseconds / 1e9
+                age = now - stamp if type(stamp) in (int, float) else math.inf
+                result['fresh'] = result['fresh'] and math.isfinite(age) and 0 <= age <= 1.5
+                result['received_age_s'] = max(result['received_age_s'], age)
         return result
 
     def _localization_callback(self, message):
         with self.lock:
             self._localization = (time.monotonic(), message)
+
+    def _fleet_localization_callback(self, message):
+        with self.lock:
+            self._fleet_localization = (time.monotonic(), message)
+
+    def current_localization(self):
+        """Read the existing 5 Hz AMCL/TF reporter, including while stationary.
+
+        Raw AMCL poses are movement-triggered; their silence at rest must not
+        invalidate a 3 s endpoint dwell. The reporter already gates TF freshness
+        and carries AMCL covariance. Legacy post-reset checks still use raw AMCL.
+        """
+        with self.lock:
+            sample = self._fleet_localization
+        if sample is None or not 0 <= time.monotonic() - sample[0] <= 1.5:
+            return None
+        message = sample[1]
+        stamp = message.header.stamp.sec + message.header.stamp.nanosec / 1e9
+        age = self.node.get_clock().now().nanoseconds / 1e9 - stamp
+        pose, covariance = message.pose.pose, message.pose.covariance
+        q = pose.orientation
+        values = (pose.position.x, pose.position.y, q.x, q.y, q.z, q.w,
+                  covariance[0], covariance[7], covariance[35])
+        if (message.header.frame_id != 'map' or not 0 <= age <= 1.5
+                or not all(math.isfinite(v) for v in values)
+                or not .99 <= sum(v*v for v in (q.x, q.y, q.z, q.w)) <= 1.01
+                or not all(0 <= covariance[i] <= limit
+                           for i, limit in ((0, .04), (7, .04), (35, .07)))):
+            return None
+        yaw = math.atan2(2*(q.w*q.z + q.x*q.y), 1-2*(q.y*q.y + q.z*q.z))
+        return (pose.position.x, pose.position.y, math.degrees(yaw))
 
     def mark_localization_reset(self):
         with self.lock:
@@ -298,6 +339,9 @@ class FleetLaneClients:
 
     def telemetry(self, robot_name):
         return self.clients[robot_name].telemetry()
+
+    def current_localization(self, robot_name):
+        return self.clients[robot_name].current_localization()
 
     def mark_localization_reset(self, robot_name):
         self.clients[robot_name].mark_localization_reset()

@@ -14,6 +14,8 @@ from vision_control.lane_client import FleetLaneClients
 
 from .control_node import create_node, FleetControlNode
 from .fleet_coordinator import FleetCoordinator
+from .demo_mission import TwoRobotDemo
+from .demo_panel import DemoPanel, LABELS as DEMO_LABELS
 from .map_math import grid_to_world, occupancy_color, quaternion_to_yaw
 from .map_math import world_to_grid
 from .navigation_client import FleetNavigationClients
@@ -46,6 +48,8 @@ class MultiBotControlUI:
         self.node = node
         self.navigation = navigation
         self.coordinator = coordinator
+        self.demo = TwoRobotDemo(coordinator)
+        self.demo_panel = None
         self.lane_navigation = lane_navigation
         self.root = tk.Tk()
         self.root.title('Pinky Pro Multi-Robot Control')
@@ -127,6 +131,12 @@ class MultiBotControlUI:
         self.root.after(ROS_POLL_INTERVAL_MS, self._poll_ros)
         self.root.after(UI_REFRESH_INTERVAL_MS, self._refresh_ui)
 
+    def _open_demo_panel(self):
+        if self.demo_panel is None or not self.demo_panel.window.winfo_exists():
+            self.demo_panel = DemoPanel(self)
+        else:
+            self.demo_panel.window.lift()
+
     def _load_route_fields(self, _event=None):
         route = self.routes.get(self.lane_direction.get(), {})
         for field, variables in self.route_values.items():
@@ -173,7 +183,8 @@ class MultiBotControlUI:
             self.goal_status.set('지도를 수신한 뒤 지도 선택을 눌러주세요.')
             return
         self.map_capture = (kind, target)
-        label = POSE_LABELS[target] if kind == 'route' else f'{target} 초기 위치'
+        label = (DEMO_LABELS[target] if kind == 'demo' else
+                 POSE_LABELS[target] if kind == 'route' else f'{target} 초기 위치')
         self.capture_cancel_button.configure(state='normal')
         self.goal_status.set(f'{label} 입력: 위치를 누르고 방향으로 드래그하세요. Esc로 취소')
 
@@ -445,6 +456,9 @@ class MultiBotControlUI:
         self.root.bind('<Escape>', self._cancel_map_capture)
 
         next_row = self._build_robot_selection_panel(controls)
+        ttk.Button(controls, text='두 로봇 통합 시연 · waypoint 설정',
+                   command=self._open_demo_panel).grid(row=next_row, column=0, columnspan=2, sticky='ew', pady=5)
+        next_row += 1
         next_row = self._build_lane_panel(controls, next_row)
         next_row = self._build_initial_pose_panel(controls, next_row)
         next_row = self._build_navigation_panel(controls, next_row)
@@ -997,7 +1011,7 @@ class MultiBotControlUI:
             return
         start_x, start_y, _, _ = self.goal_drag_start
         kind, name = self.goal_drag_target
-        color = '#fbbf24' if kind == 'route' else ROBOT_BY_NAME[name].color
+        color = '#fbbf24' if kind in {'route', 'demo'} else ROBOT_BY_NAME[name].color
         self.canvas.delete('goal_preview')
         self.canvas.create_oval(
             start_x - 5,
@@ -1060,6 +1074,11 @@ class MultiBotControlUI:
         )
         yaw_degrees = (yaw_degrees + 180.0) % 360.0 - 180.0
         kind, name = target
+        if kind == 'demo':
+            if self.demo_panel is not None and self.demo_panel.window.winfo_exists():
+                self.demo_panel.capture(name, (world_x, world_y, yaw_degrees))
+                self.goal_status.set('시연 좌표 입력됨 · 시연 창에서 지정/추가하세요.')
+            return
         if kind in {'route', 'initial'}:
             if kind == 'route':
                 variables = self.route_values[name]
@@ -1160,6 +1179,8 @@ class MultiBotControlUI:
             return
 
         self.coordinator.tick()
+        if self.demo_panel is not None and self.demo_panel.window.winfo_exists():
+            self.demo_panel.refresh()
         self._refresh_lane_panel()
         if self.node.map_generation != self.rendered_map_generation:
             self._render_map()

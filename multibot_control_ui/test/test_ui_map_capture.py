@@ -222,3 +222,12 @@ def test_late_refusal_cancels_robots_already_started(ui):
     ui._start_lane_test_all()
     ui.coordinator.cancel_robot.assert_called_once_with('robot1')
     assert ui.field_ready.get() is True
+
+
+def test_demo_capture_fills_only_editor_without_command(ui):
+    ui.demo_panel = Mock()
+    ui.demo_panel.window.winfo_exists.return_value = True
+    ui._begin_pose_capture('demo', 'b_entry')
+    drag(ui)
+    ui.demo_panel.capture.assert_called_once_with('b_entry', (-4., 7., 90.))
+    assert_no_command(ui)
