@@ -1,6 +1,7 @@
 """Static robot registry used by the control node and UI."""
 
 from dataclasses import dataclass
+import os
 from typing import Tuple
 
 
@@ -64,4 +65,13 @@ ROBOTS = (
     ),
 )
 
-ROBOT_BY_NAME = {robot.name: robot for robot in ROBOTS}
+# Optional: PINKY_FLEET_ROBOTS=robot2 limits this control PC to the named
+# robots, so it sends no permit or mode request to a robot someone else runs.
+_active = {name.strip() for name in os.environ.get('PINKY_FLEET_ROBOTS', '').split(',')
+           if name.strip()}
+if _active - {robot.name for robot in ROBOTS}:
+    raise ValueError(f'PINKY_FLEET_ROBOTS has unknown robots: {sorted(_active)}')
+if _active:
+    ROBOTS = tuple(robot for robot in ROBOTS if robot.name in _active)
+
+ROBOT_BY_NAME ={robot.name: robot for robot in ROBOTS}
