@@ -44,6 +44,7 @@ launch가 UI와 domain_bridge를 하나씩 실행합니다. 외부 브리지를 
 |---|---|
 | `control_ui.py` | Tk 레이아웃·지도 이벤트·버튼·주기 갱신·종료 |
 | `control_node.py` | domain 22 토픽·permit·명령 라우팅 |
+| `demo_mission.py`, `demo_panel.py` | 두 로봇 시연 상태·waypoint·완료/복구 검사·별도 편집 창 |
 | `fleet_coordinator.py` | 병목 소유권·임무 진행·HOLD/취소·모드 전환 |
 | `navigation_client.py` | 로봇 domain별 Nav2 액션 |
 | `lane_routes.py` | 방향별 좌표 검사·저장 |
@@ -56,7 +57,7 @@ robot1=21, robot2=19, 관제=22. 로봇별 `/navigate_to_pose`와 `/follow_lane`
 
 통합 시연 설정은 `~/.config/pinky_fleet_control/two_robot_demo.json`에 저장됩니다. 기존 3개 좌표 연속 임무 입력은 UI에서 제거했습니다. 예전 `lane_routes.json` 파일은 보존합니다. 병목 영구 설정은 `config/bottleneck_zones.yaml`; UI에서 지정한 사각형은 현재 실행에만 유지됩니다.
 
-현재 로봇 차선 설정은 0.06m/s·횡단보도 정지 OFF·차선 라이다 물체 정지 OFF입니다. 자세한 설정과 검증 범위는 공통 실행 가이드에 있습니다.
+현재 저장소 차선 설정은 cruise/max/fallback 0.09m/s, blind/approach 0.06m/s·횡단보도 감속 통과·라이다 물체 정지 ON입니다. 기체의 실제 운용 JSON은 별도로 확인합니다. 자세한 설정과 검증 범위는 공통 실행 가이드에 있습니다.
 
 ## 개발
 
@@ -64,4 +65,4 @@ robot1=21, robot2=19, 관제=22. 로봇별 `/navigate_to_pose`와 `/follow_lane`
 
 ## 두 로봇 차선↔Nav2 통합 시연
 
-[설정·waypoint 편집·자동 종료 사용법](docs/TWO_ROBOT_DEMO.md)을 참고하세요.
+[설정·waypoint 편집·자동 종료 사용법](docs/TWO_ROBOT_DEMO.md)을 참고하세요. 현재 전체 복구 대기가 다른 로봇의 최종 Nav2까지 멈추는 문제가 남아 있으며 전체 완주는 미확인입니다.

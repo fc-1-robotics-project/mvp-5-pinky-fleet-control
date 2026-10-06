@@ -1,8 +1,8 @@
 # 새 관제 PC 설치·기존 PC 업데이트
 
-**두 저장소에서 `codex/lane-field-20261001` 브랜치를 함께 사용합니다.**
+**두 저장소에서 `codex/two-robot-demo-20261005` 브랜치를 함께 사용합니다.**
 
-[로봇 설치 가이드](https://github.com/jsh0116/pinky-lane-driving/blob/codex/lane-field-20261001/TEAM_LANE_GUIDE.md) → 이 문서 → [실행·UI 사용법](UI_INTEGRATION.md) 순서입니다. 기준일: 2026-10-03.
+[로봇 설치 가이드](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md) → 이 문서 → [실행·UI 사용법](UI_INTEGRATION.md) 순서입니다. 기준일: 2026-10-06.
 
 ## 1. 준비
 
@@ -12,7 +12,7 @@
 | 로봇 | 같은 공유 브랜치의 통합 스택과 기체별 보정·지도·모델 설치 |
 | 기본 domain | robot1=21, robot2=19, 관제=22 |
 | 포함 패키지 | `pinky_interfaces`, `vision_control`, `multibot_control_ui` |
-| 현재 차선 프로필 | **0.06m/s / YOLO 448 / 횡단보도 정지 OFF / 차선 라이다 물체 자동 정지 OFF** |
+| 현재 차선 프로필 | **cruise/max/fallback 0.09m/s, blind/approach 0.06m/s / YOLO 448 / 횡단보도 감속 / 라이다 정지 ON** |
 
 ROS 미설치 PC는 [ROS Jazzy 공식 Ubuntu 설치 안내](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)에 따라 먼저 설치합니다. PC에서는 `ros-jazzy-desktop`을 사용할 수 있습니다. 이 PC에는 차선 추론용 torch/YOLO·카메라 드라이버·모델이 필요하지 않습니다. 차선 인식은 로봇에서 수행합니다.
 
@@ -28,8 +28,8 @@ sudo apt install git python3-colcon-common-extensions python3-rosdep \
   python3-tk python3-pytest ros-jazzy-domain-bridge
 source /opt/ros/jazzy/setup.bash
 mkdir -p ~/colcon_ws/src
-git clone --branch codex/lane-field-20261001 \
-  https://github.com/INYUP-BAEK/pinky-fleet-control.git \
+git clone --branch codex/two-robot-demo-20261005 \
+  https://github.com/fc-1-robotics-project/mvp-5-pinky-fleet-control.git \
   ~/colcon_ws/src/pinky-fleet-control
 # rosdep 초기화가 안 된 PC에서만: sudo rosdep init
 rosdep update
@@ -69,7 +69,7 @@ ros2 launch multibot_control_ui control_ui.launch.py
 1. robot1 또는 robot2를 선택하고 맵·현재 위치·heartbeat·차선 서버를 확인합니다.
 2. AMCL 행의 `지도 선택` → 실제 위치/방향 드래그 → `초기 위치 적용`.
 3. 차선 시험은 현장 준비 확인 → `선택 로봇 차선 시험 시작`. 두 로봇 시연은 별도 설정 창에서 좌표·waypoint를 저장한 뒤 메인 UI에서 `통합 시연 시작`을 누릅니다.
-4. 개별 차선 시험은 실제 출구에서 `선택 로봇 차선 완료`. 통합 시연은 위치·차선/정지 조건으로 자동 완료하거나 수동 완료할 수 있습니다.
+4. 개별 차선 시험은 실제 출구에서 `선택 로봇 차선 완료`. 통합 시연은 AMCL 끝 반경 20cm에서 0.5초 도착 확인 후 자동 완료하거나 수동 완료할 수 있습니다. 차선 소실·3초 정지는 필수 조건이 아닙니다.
 5. 마무리는 `선택 임무 취소` 또는 `시연 중단` → `전체 일시정지 (HOLD)` → STOP·허가 해제 확인 → PC와 로봇 launch 종료.
 
 좌우 분할선을 드래그해 조작 패널 폭을 조절합니다. 지도 선택은 입력란만 채우며 `초기 위치 적용`/`좌표 반영`으로 확정합니다. 시연 설정은 `설정 저장`이 필요합니다. `Esc`는 좌표 선택 모드만 종료합니다. 일반 지도 드래그는 선택 로봇의 Nav2 목표를 전송합니다. [UI 사용법](UI_INTEGRATION.md)과 [통합 시연 가이드](multibot_control_ui/docs/TWO_ROBOT_DEMO.md)를 참고하세요.
@@ -85,7 +85,7 @@ ros2 launch multibot_control_ui control_ui.launch.py
 
 다른 이름/domain이 필요하면 로봇 실행 인자와 `multibot_control_ui/multibot_control_ui/robot_config.py`, `multibot_control_ui/config/domain_bridge.yaml`을 함께 맞춘 뒤 재빌드합니다. 관제 domain 변경 시 UI launch와 bridge의 22도 함께 수정합니다. bridge YAML의 같은 원본 토픽 키 반복은 각 로봇 도메인별 항목이므로 일반 dict 변환으로 합치면 안 됩니다.
 
-PC의 `~/.config/pinky_fleet_control/lane_routes.json`은 입구·출구·다음 목표를 저장합니다. 다른 PC로 복사할 수 있지만 같은 지도/코스인지 확인하고 좌표를 다시 확인합니다. 경로는 로봇별이 아닌 **방향별 공용**입니다. 새 지도에서는 UI로 다시 지정합니다. 병목 영역 영구 설정은 `multibot_control_ui/config/bottleneck_zones.yaml`에 있고, UI에서 그린 영역은 종료 시 없어집니다.
+통합 시연 설정은 `~/.config/pinky_fleet_control/two_robot_demo.json`에 저장합니다. A/B 배정, 네 고정 좌표, 로봇별 waypoint와 목록 확정 상태가 포함됩니다. 같은 지도/코스에서만 복사해 사용하며 다른 지도는 UI에서 다시 지정합니다. 예전 `lane_routes.json`은 보존되지만 옛 연속 임무 입력 UI는 제거했습니다. 병목 영구 설정은 `multibot_control_ui/config/bottleneck_zones.yaml`; UI에서 그린 영역은 종료 시 없어집니다.
 
 IP는 SSH 접속 시 해당 로봇 주소를 사용합니다. 사용자 홈 경로·SSH 개인키·GitHub 자격증명을 다른 팀원과 공유할 필요가 없습니다.
 
@@ -97,8 +97,8 @@ UI와 브리지를 종료한 상태에서 실행합니다. 작업 중인 수정�
 cd ~/colcon_ws/src/pinky-fleet-control
 git status --short
 git fetch origin
-git switch codex/lane-field-20261001
-git pull --ff-only origin codex/lane-field-20261001
+git switch codex/two-robot-demo-20261005
+git pull --ff-only origin codex/two-robot-demo-20261005
 source /opt/ros/jazzy/setup.bash
 cd ~/colcon_ws
 colcon build --symlink-install --packages-up-to multibot_control_ui
@@ -115,10 +115,10 @@ source ~/colcon_ws/install/setup.bash
 | Tk 창이 열리지 않음 | GUI 세션의 DISPLAY와 `python3-tk` |
 | 맵·heartbeat 없음 | domain 21/19/22, bridge 한 개, SUBNET/멀티캐스트/방화벽 |
 | 차선 시작 버튼 비활성 | 로봇 선택·현장 준비 체크·서버 연결·진행 임무/취소 상태 |
-| `watchdog_setting_mismatch` / `velocity_limit_exceeded` | 로봇 JSON 네 속도 0.06, 설치 워치독/임무 서버 버전 일치 |
+| `watchdog_setting_mismatch` / `velocity_limit_exceeded` | cruise/max/fallback 0.09, blind/approach 0.06, 워치독/임무 서버 상한 0.09와 버전 일치 |
 | `lane_observation_stale` / 센서 오류 | 로봇 카메라·추론 지연·온도, 448 입력, 영상/scan/odom 신선도 |
 | 곡선에서 감속·끝에서 정지 | 현재 측정 경로 길이, 곡률/각속도 상한, 실제 차선 끝 여부 |
-| 가까운 벽에서 정지 | Nav2 정지인지 차선 모드인지와 종료 이유 구분. 현재 차선 물체 정지는 OFF이나 센서 오류와 Nav2 장애물 판정은 별개 |
+| 가까운 벽에서 정지 | Nav2 정지인지 차선 모드인지와 종료 이유 구분. 차선 물체 정지는 ON. PR #4의 차로 필터는 직진 반응 구간에만 적용하며 Nav2 장애물 판정과 별개 |
 
 ## 7. 코드 검사·검증 범위
 
@@ -129,16 +129,10 @@ source /opt/ros/jazzy/setup.bash
 source ~/colcon_ws/install/setup.bash
 cd ~/colcon_ws/src/pinky-fleet-control
 PYTHONPATH="$PWD/multibot_control_ui:$PWD/vision_control:${PYTHONPATH:-}" \
-python3 -m pytest -q \
-  multibot_control_ui/test/test_map_math.py \
-  multibot_control_ui/test/test_zone_config.py \
-  multibot_control_ui/test/test_fleet_coordinator.py \
-  multibot_control_ui/test/test_lane_routes.py \
-  multibot_control_ui/test/test_lane_client_lifecycle.py \
-  multibot_control_ui/test/test_ui_shutdown.py \
-  multibot_control_ui/test/test_ui_map_capture.py
+python3 -m pytest -q multibot_control_ui/test \
+  -k 'not flake8 and not pep257 and not copyright'
 ```
 
-관제 동작 검사 **73개 통과**. ROS 연결 없는 Tk 창에서 1180×740/1600×900 크기의 잘림·분할선 최소 폭·다섯 지도 선택 버튼을 확인했습니다. 현재 로봇 코드와 운용 JSON의 차선 속도는 0.06m/s이고, 로봇 단위/격리 ROS 검사까지 확인했습니다. **0.06 실주행, 새 로봇·새 PC 조합의 현장 주행은 미검증**입니다.
+관제 동작 검사 **146개 통과**(lint 검사 3개 제외). PC 패키지와 두 로봇의 실행용 패키지 빌드는 완료했습니다. 실제 통합 시연은 시험했으나 전체 완주는 미확인입니다. 관제 전체 복구 대기가 다른 로봇의 최종 Nav2까지 멈추는 문제를 [통합 시연 가이드](multibot_control_ui/docs/TWO_ROBOT_DEMO.md#현장-확인과-남은-문제-2026-10-06)에 기록했습니다. 모의 검사를 현장 완주 증거로 해석하지 않습니다.
 
 관제에 별도 데이터 수집 기능은 없습니다. 정상 운용에는 `/tmp`의 옛 시험 스크립트가 필요하지 않습니다.

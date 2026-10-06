@@ -1,22 +1,25 @@
 # 로봇·관제 실행 및 UI 사용법
 
-두 저장소 모두 **`codex/lane-field-20261001`** 사용. 최신 정리: 2026-10-03.
+두 저장소 모두 **`codex/two-robot-demo-20261005`** 사용. 최신 정리: 2026-10-06.
 
-처음 설치하는 장비는 [로봇 설치](https://github.com/jsh0116/pinky-lane-driving/blob/codex/lane-field-20261001/TEAM_LANE_GUIDE.md) / [관제 PC 설치](https://github.com/INYUP-BAEK/pinky-fleet-control/blob/codex/lane-field-20261001/TEAM_LANE_GUIDE.md)부터 진행합니다.
+처음 설치하는 장비는 [로봇 설치](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md) / [관제 PC 설치](https://github.com/fc-1-robotics-project/mvp-5-pinky-fleet-control/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md)부터 진행합니다.
 
 ## 현재 공유 설정
 
 | 항목 | 값 |
 |---|---|
-| 기본·최대·한쪽 경계 보완·차선 소실 유지 속도 | **0.06m/s** |
+| 기본·최대·한쪽 경계 보완 속도 | **0.09m/s** |
+| 차선 소실 유지 / 횡단보도 감속 속도 | **0.06m/s** |
 | 차선 각속도 상한 / 최소 추종 거리 / 조향 배율 | 0.6rad/s / 0.10m / 1.2 |
 | 카메라 / YOLO 입력 | 640×480 / **448** |
-| 횡단보도 자동 정지 / 라이다 물체 자동 정지 | **둘 다 OFF**인 차선 시험 프로필 |
+| 횡단보도 / 라이다 물체 자동 정지 | 인식·감속 ON, 횡단보도 정지 OFF / **라이다 정지 ON** |
 | 일시 인식 소실 | 측정했던 경로를 odom으로 변환해 최대 1.5초·6cm 안에서만 사용 |
 
-라이다는 Nav2·센서 신선도 점검에 계속 사용됩니다. `lidar_obstacle_stop_enabled=false`는 차선 제어의 물체 판정 정지만 끕니다. Nav2 장애물 회피 설정을 끄는 옵션은 아닙니다. 비상정지·관제 permit·로컬 허가 만료·영상/센서 오류 점검은 유지됩니다. 이 프로필은 현장 감시와 즉시 정지가 가능한 차선 시험용입니다.
+저장소의 `lane_control.json`과 `lane_control_lane_only.json`은 현재 같은 운용 값을 갖습니다. 파일 이름으로 기능 ON/OFF를 판단하지 않습니다. 두 프로필 모두 `crosswalk_control_enabled=true`, `behavior.crosswalk_stop=false`, `lidar_obstacle_stop_enabled=true`입니다. 횡단보도는 감속해 통과하고 라이다 물체 판정은 정지시킬 수 있습니다. PR #4는 조향 경로를 유지하면서 직진 반응 구간만 차로 내부 점으로 검사합니다. Nav2 장애물 회피는 별도 설정입니다.
 
-**0.06m/s는 적용·빌드·단위/모의 ROS 검사까지 완료했고 실제 주행은 아직 검증하지 않았습니다.** 이전 0.03m/s 주행에서 사용자의 실제 출구 도착 확인이 있었으며, 이를 새 속도의 완주 검증으로 간주하지 않습니다.
+로봇 홈의 JSON은 Git 갱신으로 바뀌지 않습니다. `lane_control_config`로 지정한 실제 파일을 먼저 확인합니다. 비상정지·관제 permit·로컬 허가 만료·영상/센서 오류 점검은 유지됩니다.
+
+**전체 통합 시연 완주는 미확인입니다.** 2026-10-06 현장 시험에서는 관제 전체 복구 대기가 A의 최종 Nav2까지 멈췄습니다. 자세한 현재 동작과 남은 문제는 [통합 시연 가이드](multibot_control_ui/docs/TWO_ROBOT_DEMO.md)에 있습니다.
 
 ## 1. 로봇 SSH 터미널 — 한 번 실행
 
@@ -38,9 +41,7 @@ fi
 
 export PINKY_MAP="$HOME/pinky_maps/site.yaml"
 export PINKY_LANE_CONFIG="$HOME/pinky_calibration/lane_control_lane_only.json"
-# 기존 시험 로봇(192.168.1.139)에서는 위 두 줄 대신 아래 경로를 사용합니다.
-# export PINKY_MAP="$HOME/260916_map.yaml"
-# export PINKY_LANE_CONFIG="$HOME/pinky_calibration/lane_control_lane_only_verified_20261001.json"
+# 실제 설치한 지도와 기체별 보정 JSON 경로로 바꿉니다.
 
 test -f "$PINKY_MAP" && test -f "$PINKY_LANE_CONFIG" && \
 ros2 launch pinky_robot_system robot_system.launch.py \
@@ -48,7 +49,7 @@ ros2 launch pinky_robot_system robot_system.launch.py \
   start_motors:=true start_battery:=false start_nav2:=true \
   start_lane_control:=true lane_control_config:="$PINKY_LANE_CONFIG" \
   lane_dry_run:=false hardware_watchdog_confirmed:=true \
-  lane_start_enabled:=false perception_imgsz:=448
+  lane_start_enabled:=false perception_imgsz:=448 perception_cpu_threads:=1
 ```
 
 `hardware_watchdog_confirmed:=true`는 모터 통신 단절 시 실제로 정지함을 확인한 기체에 사용합니다. 해당 확인 전 장비의 소프트웨어 준비 점검은 `start_motors:=false lane_dry_run:=true hardware_watchdog_confirmed:=false`로 실행합니다. 이 상태는 주행 준비 완료 판정을 위한 실제 정지 점검을 대체하지 않습니다.
@@ -62,7 +63,7 @@ source /opt/ros/jazzy/setup.bash
 source ~/colcon_ws/install/setup.bash
 export ROS_DOMAIN_ID=22
 export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
-unset ROS_LOCALHOST_ONLY
+unset ROS_LOCALHOST_ONLY PINKY_FLEET_ROBOTS
 ros2 launch multibot_control_ui control_ui.launch.py
 ```
 
@@ -90,7 +91,7 @@ ros2 launch multibot_control_ui control_ui.launch.py
 | 진행 임무 잠시 멈춤 | `선택 임무 일시정지` / `선택 임무 재개` | 임무·목표 유지 |
 | 진행 임무 취소 | `선택 임무 취소` | 취소·정지 처리 |
 
-차선 단독 시험은 저장 경로가 필요 없으며 실제 출구에서 `선택 로봇 차선 완료`로 끝냅니다. 통합 시연은 AMCL상 끝 지점 반경 7cm 안에서 유효한 양쪽 차선 소실 또는 실제 정지 3초를 확인해 자동 종료합니다. 수동 완료 버튼도 사용할 수 있으며 이후 다음 단계로 움직일 수 있습니다. 시연 중 취소 버튼은 `통합 시연 중단 (두 대)`로 바뀌고 두 로봇을 함께 중단합니다.
+차선 단독 시험은 저장 경로가 필요 없으며 실제 출구에서 `선택 로봇 차선 완료`로 끝냅니다. 통합 시연은 AMCL상 끝 지점 반경 20cm 안에서 0.5초 도착을 확인해 자동 종료합니다. 차선 유무·3초 정지 대기는 필요 없으며, STOP·로컬 허가 OFF 확인 뒤 다음 단계로 넘어갑니다. 수동 완료 버튼도 사용할 수 있으며 이후 다음 단계로 움직일 수 있습니다. 시연 중 취소 버튼은 `통합 시연 중단 (두 대)`로 바뀌고 두 로봇을 함께 중단합니다.
 
 시작 버튼은 연결·준비 조건이 충족되어야 활성화됩니다. 전체 비상정지 후에는 원인을 해소하고 `비상정지 해제 · 관제 RUN`으로 관제 상태를 복구합니다. 개별 Nav2의 저장 목표는 재개될 수 있습니다. 차선 시험/시연은 새로 시작해야 하며, 일시정지·임무 취소로 비상정지가 풀리지는 않습니다. 전체 버튼의 적용 범위는 [UI 기능표](multibot_control_ui/README.md#자주-쓰는-ui-기능)에 정리되어 있습니다.
 
@@ -108,7 +109,7 @@ ros2 launch multibot_control_ui control_ui.launch.py
 - PC 시연 설정: `~/.config/pinky_fleet_control/two_robot_demo.json`. A/B 로봇·고정 좌표·waypoint를 저장합니다. 같은 지도·같은 코스가 전제이며 지도 해시가 다르면 시작을 거부합니다. 예전 `lane_routes.json`은 보존하지만 메인 UI의 옛 세 좌표 연속 임무 입력은 제거했습니다.
 - UI의 병목 사각형은 현재 실행에만 적용됩니다. 영구 설정은 `multibot_control_ui/config/bottleneck_zones.yaml`을 수정하고 재빌드합니다.
 - 기체별 카메라/차체 보정은 로봇의 JSON·URDF·카메라 YAML에 있습니다. 저장소 업데이트가 홈의 운용 JSON을 자동 변경하지는 않습니다.
-- 네 가지 속도 필드는 `behavior.cruise_speed`, `control.max_speed`, `path.fallback_speed`, `path.blind_speed`이며 현재 모두 `0.06`입니다. 워치독 `max_speed_mps=0.06`, 임무 서버 기대값 `0.06`, 감시 임계값 `0.0605`(허용 오차 포함)도 맞춰져 있습니다. JSON만 임의 증속하면 거부/중단될 수 있습니다. 변경 후 로봇 launch를 재시작합니다.
+- 속도는 `behavior.cruise_speed=0.09`, `control.max_speed=0.09`, `path.fallback_speed=0.09`, `path.blind_speed=0.06`, `behavior.approach_speed=0.06`입니다. 차선 launch의 워치독 `max_speed_mps`와 임무 서버 기대값은 `0.09`입니다. JSON만 임의 증속하면 거부/중단될 수 있습니다. 변경 후 로봇 launch를 재시작합니다.
 - 거리·종료 이유는 UI와 작은 임무 상태 메시지로 확인합니다. 원본 영상·rosbag·CSV 자동 수집은 없습니다.
 
 읽기 전용 진단 예시(해당 터미널에서 ROS/워크스페이스 source 후):
@@ -127,3 +128,13 @@ ROS_DOMAIN_ID=21 ros2 topic echo /cmd_vel --once
 ```
 
 `single_boundary`는 한쪽 경계 사용, `recent_path_no_boundaries`는 이전 측정 경로의 제한적 재사용입니다. `no_current_lane`·`lane_observation_stale`가 지속되면 현재 경로/영상 신선도를 확인합니다. `velocity_limit_exceeded` 또는 `watchdog_setting_mismatch`는 속도 설정·설치 코드 버전을 대조합니다. `no_odom_progress`는 주행 명령 대비 실제 이동을 확인합니다.
+
+## 7. 최신 시험 환경의 경로 예시
+
+| 장치 | robot_id / domain | map | lane_control_config |
+|---|---|---|---|
+| A | robot1 / 21 | `/home/pinky/261003.yaml` | `/home/pinky/pinky_calibration/lane_control_lane_only_verified_20261001.json` |
+| B | robot2 / 19 | `/home/pinky/pinky_robot_ws/src/pinky-lane-driving/pinky_navigation/map/261003.yaml` | `/home/pinky/pinky_calibration/lane_control_lane_only.json` |
+| 관제 | domain 22 | 로봇 지도 수신 | PC는 차선 JSON을 실행하지 않음 |
+
+위 경로는 현재 시험 장비의 예시입니다. 새 기체는 실제 지도 위치와 자체 보정을 사용합니다. B 실행 시 1절의 `ROS_DOMAIN_ID=19`, `robot_id:=robot2`를 함께 변경합니다. `PINKY_FLEET_ROBOTS`를 해제하면 등록된 두 로봇을 모두 표시합니다.
