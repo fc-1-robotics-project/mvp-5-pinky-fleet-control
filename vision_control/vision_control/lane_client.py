@@ -148,32 +148,59 @@ class RobotLaneClient:
         with self.lock:
             self._fleet_localization = (time.monotonic(), message)
 
-    def current_localization(self):
-        """Read the existing 5 Hz AMCL/TF reporter, including while stationary.
+    def current_localization(self, *, position_variance_limit=.04, yaw_variance_limit=.07):
+        """Read a fresh map pose using the caller's covariance limits."""
+        return self.localization_status(position_variance_limit=position_variance_limit,
+                                        yaw_variance_limit=yaw_variance_limit)['pose']
 
-        Raw AMCL poses are movement-triggered; their silence at rest must not
-        invalidate a 3 s endpoint dwell. The reporter already gates TF freshness
-        and carries AMCL covariance. Legacy post-reset checks still use raw AMCL.
-        """
+    def localization_status(self, *, position_variance_limit=.04, yaw_variance_limit=.07):
+        """Explain missing/stale/invalid localization without changing AMCL data."""
+        if not all(math.isfinite(v) and v > 0 for v in (position_variance_limit, yaw_variance_limit)):
+            raise ValueError('Localization variance limits must be finite and positive')
+        result = dict(pose=None, reason='위치 정보 수신 대기')
         with self.lock:
             sample = self._fleet_localization
-        if sample is None or not 0 <= time.monotonic() - sample[0] <= 1.5:
-            return None
+        if sample is None:
+            return result
+        received_age = time.monotonic() - sample[0]
+        if not 0 <= received_age <= 1.5:
+            result['reason'] = f'위치 정보 수신 지연 ({received_age:.2f}초 / 최대 1.5초)'
+            return result
         message = sample[1]
         stamp = message.header.stamp.sec + message.header.stamp.nanosec / 1e9
         age = self.node.get_clock().now().nanoseconds / 1e9 - stamp
+        if not math.isfinite(age) or not 0 <= age <= 1.5:
+            result['reason'] = f'위치 원본 시각 불일치/지연 ({age:.2f}초 / 최대 1.5초)'
+            return result
+        if message.header.frame_id != 'map':
+            result['reason'] = f'위치 좌표계 확인 필요 ({message.header.frame_id} / map 필요)'
+            return result
         pose, covariance = message.pose.pose, message.pose.covariance
         q = pose.orientation
         values = (pose.position.x, pose.position.y, q.x, q.y, q.z, q.w,
                   covariance[0], covariance[7], covariance[35])
-        if (message.header.frame_id != 'map' or not 0 <= age <= 1.5
-                or not all(math.isfinite(v) for v in values)
-                or not .99 <= sum(v*v for v in (q.x, q.y, q.z, q.w)) <= 1.01
-                or not all(0 <= covariance[i] <= limit
-                           for i, limit in ((0, .04), (7, .04), (35, .07)))):
-            return None
+        if not all(math.isfinite(v) for v in values):
+            result['reason'] = '위치/방향/분산에 유효하지 않은 값이 있음'
+            return result
+        if not .99 <= sum(v*v for v in (q.x, q.y, q.z, q.w)) <= 1.01:
+            result['reason'] = '위치 방향 quaternion 확인 필요'
+            return result
+        result['covariance'] = (covariance[0], covariance[7], covariance[35])
+        if any(covariance[i] < 0 for i in (0, 7, 35)):
+            result['reason'] = '위치/방향 분산이 음수임'
+            return result
+        if max(covariance[0], covariance[7]) > position_variance_limit:
+            result['reason'] = (f'위치 분산 범위 초과 (x={covariance[0]:.3f}, '
+                                f'y={covariance[7]:.3f} / 최대 {position_variance_limit:.3f}m²)')
+            return result
+        if covariance[35] > yaw_variance_limit:
+            result['reason'] = (f'방향 분산 범위 초과 (표준편차 '
+                                f'{math.degrees(math.sqrt(covariance[35])):.1f}° / 최대 '
+                                f'{math.degrees(math.sqrt(yaw_variance_limit)):.1f}°)')
+            return result
         yaw = math.atan2(2*(q.w*q.z + q.x*q.y), 1-2*(q.y*q.y + q.z*q.z))
-        return (pose.position.x, pose.position.y, math.degrees(yaw))
+        result.update(pose=(pose.position.x, pose.position.y, math.degrees(yaw)), reason='위치 수신 정상')
+        return result
 
     def mark_localization_reset(self):
         with self.lock:
@@ -340,8 +367,11 @@ class FleetLaneClients:
     def telemetry(self, robot_name):
         return self.clients[robot_name].telemetry()
 
-    def current_localization(self, robot_name):
-        return self.clients[robot_name].current_localization()
+    def current_localization(self, robot_name, **limits):
+        return self.clients[robot_name].current_localization(**limits)
+
+    def localization_status(self, robot_name, **limits):
+        return self.clients[robot_name].localization_status(**limits)
 
     def mark_localization_reset(self, robot_name):
         self.clients[robot_name].mark_localization_reset()

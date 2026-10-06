@@ -10,8 +10,12 @@ from .lane_routes import validate_pose
 from .robot_config import ROBOT_BY_NAME
 
 POSES = ('a_exit', 'a_final', 'b_entry', 'b_exit')
-EXIT_RADIUS_M = .07
-EXIT_STATIONARY_S = 3.
+EXIT_RADIUS_M = .20
+EXIT_DWELL_S = .5
+RECOVERY_DELAY_S = 3.
+RECOVERY_STABLE_S = 1.
+POSE_POSITION_VARIANCE_LIMIT = .30
+POSE_YAW_VARIANCE_LIMIT = math.radians(20.) ** 2
 
 
 def validate_plan(data):
@@ -50,7 +54,7 @@ def save_plan(path, plan):
 
 
 class LaneExitCondition:
-    """No-line exit or actual 3 s standstill, only inside the 7 cm map region."""
+    """Confirm arrival near the lane endpoint before requesting the stop handshake."""
 
     def __init__(self):
         self.since = None
@@ -63,33 +67,26 @@ class LaneExitCondition:
         if not isinstance(status, dict):
             self.reset()
             return ''
-        bounds = status.get('boundaries')
-        age, transport = status.get('observation_age_s'), telemetry.get('received_age_s', 0.)
+        transport = telemetry.get('received_age_s')
         numeric = lambda v: type(v) in (int, float) and math.isfinite(v)
         valid = (allowed and pose is not None and math.dist(pose[:2], target[:2]) <= EXIT_RADIUS_M
                  and telemetry.get('fresh') is True and status.get('version') == 1
                  and telemetry.get('active') is True and telemetry.get('mode') == 'LANE'
                  and telemetry.get('permission_enabled') is True
-                 and status.get('gate_run') is True and status.get('sensors_ok') is True
+                 and status.get('gate_run') is True
                  and status.get('obstacle') is False
-                 and isinstance(bounds, dict)
-                 and all(type(bounds.get(key)) is bool for key in ('left_visible', 'right_visible'))
-                 and numeric(age) and numeric(transport) and 0 <= age + transport <= 1.1
+                 and numeric(transport) and 0 <= transport <= 1.5
                  and status.get('control_reason') in {
-                     'follow', 'tracking', 'stop_requested_or_short_path', 'sensor_failure'})
+                     'follow', 'tracking', 'crosswalk', 'stop_requested_or_short_path', 'sensor_failure'})
         if not valid:
-            self.reset()
-            return ''
-        if not bounds['left_visible'] and not bounds['right_visible']:
-            return '양쪽 차선 소실 · 종료 반경 안'
-        stationary = status.get('stationary_s')
-        if not numeric(stationary) or stationary <= 0:
             self.reset()
             return ''
         if self.since is None:
             self.since = now
-        if now - self.since >= EXIT_STATIONARY_S and stationary >= EXIT_STATIONARY_S:
-            return '종료 반경 안 실제 정지 3초'
+        # Camera delay may postpone the request, but does not erase valid AMCL
+        # arrival evidence. Never finish with a current sensor fault.
+        if now - self.since >= EXIT_DWELL_S and status.get('sensors_ok') is True:
+            return f'차선 끝 {EXIT_RADIUS_M * 100:g}cm 안 도착 확인'
         return ''
 
 
@@ -101,6 +98,7 @@ class TwoRobotDemo:
         coordinator.sequence = self
         self.clock = clock
         self.active = False
+        self.recovering = None
         self.stage = 'IDLE'
         self.detail = '시연 설정 대기'
         self.plan = {}
@@ -125,18 +123,29 @@ class TwoRobotDemo:
             raise ValueError('긴급 정지·수동 모드를 해제하고 차선 서버를 연결하세요.')
         for name in (plan['a'], plan['b']):
             status = f.lane_navigation.telemetry(name)
-            if (name in f.requests or not f.node.heartbeat_is_fresh(name)
-                    or f.lane_navigation.current_localization(name) is None
-                    or not status.get('fresh') or status.get('active') is not False
-                    or status.get('mode') != 'STOP' or status.get('permission_enabled') is not False
-                    or status.get('cleanup_ok') is not True
-                    or not isinstance(status.get('exit_status'), dict)
-                    or status['exit_status'].get('version') != 1):
-                raise ValueError(f'{name}: STOP·허가 OFF·AMCL·새 로봇 상태 정보 확인이 필요합니다.')
-        if not f.lane_navigation.telemetry(plan['a']).get('ready'):
-            raise ValueError('A 로봇의 차선 시작 점검이 준비되지 않았습니다.')
+            checks = (
+                (name not in f.requests, '진행 중인 기존 임무를 먼저 정리하세요.'),
+                (f.node.heartbeat_is_fresh(name), 'heartbeat 수신 대기/지연'),
+                (status.get('fresh') is True, '로봇 상태 메시지 수신 대기/지연'),
+                (status.get('active') is False, '이전 차선 임무 종료 확인 중'),
+                (status.get('mode') == 'STOP', f"STOP 모드 확인 필요 (현재 {status.get('mode')})"),
+                (status.get('permission_enabled') is False, '차선 로컬 주행 허가 OFF 확인 중'),
+                (status.get('cleanup_ok') is True, '이전 임무 STOP·허가 정리 확인 중'),
+                (isinstance(status.get('exit_status'), dict)
+                 and status['exit_status'].get('version') == 1, '로봇 시연 상태 코드 버전 확인 필요'),
+            )
+            for passed, reason in checks:
+                if not passed:
+                    raise ValueError(f'{name}: {reason}')
+            localization = self._pose_status(name)
+            if localization['pose'] is None:
+                raise ValueError(f"{name}: {localization['reason']}")
+        status = f.lane_navigation.telemetry(plan['a'])
+        if not status.get('ready'):
+            raise ValueError(f"{plan['a']}: 차선 시작 점검 · {status.get('readiness_reason', '준비 대기')}")
         self.plan, self.pending, self.closed = plan, deepcopy(plan['waypoints']), dict(plan['closed'])
         self.done, self.tasks, self.route_done = {'A': [], 'B': []}, {}, set()
+        self.recovering = None
         for condition in self.exits.values():
             condition.reset()
         self.active, self.stage, self.detail = True, 'A_LANE', 'A 차선 출발 · B 대기'
@@ -160,6 +169,7 @@ class TwoRobotDemo:
         if not self.active:
             return
         self.active = False
+        self.recovering = None
         self.stage, self.detail = ('FAILED' if failed else 'CANCELLED'), detail
         for role in ('A', 'B'):
             self.exits[role].reset()
@@ -171,22 +181,170 @@ class TwoRobotDemo:
             self.fleet.pause()
 
     def _nav(self, role, goal):
-        name = self.plan[role.lower()]
-        ok, detail = self.fleet.submit_goal(name, *goal, _owner=self)
-        if not ok:
-            self.cancel(detail, failed=True)
-            return
-        self.tasks[role] = dict(kind='NAV', goal=goal, request=self.fleet.requests[name],
-                                started=self.clock())
+        self.tasks[role] = dict(kind='NAV', goal=goal, request=None,
+                                started=self.clock(), retries=0)
+        if not self.recovering:
+            self._submit_task(role)
 
     def _lane(self, role):
-        name = self.plan[role.lower()]
-        ok, detail = self.fleet.submit_lane_test(name, self.plan[role.lower() + '_route'], _owner=self)
+        self.tasks[role] = dict(kind='LANE', request=None, started=self.clock(),
+                                finish_sent=None, retries=0)
+        if not self.recovering:
+            self._submit_task(role)
+
+    def _submit_task(self, role):
+        task, name = self.tasks[role], self.plan[role.lower()]
+        if task['kind'] == 'NAV':
+            ok, detail = self.fleet.submit_goal(name, *task['goal'], _owner=self)
+        else:
+            ok, detail = self.fleet.submit_lane_test(
+                name, self.plan[role.lower() + '_route'], _owner=self)
         if not ok:
-            self.cancel(detail, failed=True)
+            self.wait_for_recovery(f'{name}: {detail}')
+            return False
+        task['request'] = self.fleet.requests[name]
+        task['started'] = self.clock()
+        return True
+
+    def wait_for_recovery(self, reason):
+        """Retain the stage, queues and requests while the fleet holds motion."""
+        if not self.active:
             return
-        self.tasks[role] = dict(kind='LANE', request=self.fleet.requests[name],
-                                started=self.clock(), finish_sent=None)
+        if self.recovering is None:
+            self.recovering = dict(healthy_since=None, last_attempt=self.clock(), reason='')
+            for condition in self.exits.values():
+                condition.reset()
+        if self.recovering['reason'] != reason:
+            self.recovering['reason'] = reason
+            logger = getattr(self.fleet.node, 'get_logger', None)
+            if logger:
+                logger().warning(f'통합 시연 복구 대기 [{self.stage}]: {reason}')
+        self.detail = f'복구 대기 · {reason} · 목표/진행 단계 유지'
+        self.fleet._apply_motion_policy()
+        self.fleet.node.publish_permits_now()
+
+    def _pose_status(self, name):
+        return self.fleet.lane_navigation.localization_status(name,
+            position_variance_limit=POSE_POSITION_VARIANCE_LIMIT,
+            yaw_variance_limit=POSE_YAW_VARIANCE_LIMIT)
+
+    def _current_pose(self, name):
+        return self._pose_status(name)['pose']
+
+    def _health_error(self):
+        for role in ('A', 'B'):
+            name = self.plan[role.lower()]
+            if not self.fleet.node.heartbeat_is_fresh(name):
+                return f'{name}: heartbeat 수신 재확인 중'
+            if not self.fleet.node.pose_is_fresh(name):
+                return f'{name}: 관제 지도 위치 수신 재확인 중'
+            localization = self._pose_status(name)
+            if localization['pose'] is None:
+                return f"{name}: {localization['reason']} · 재확인 중"
+            if not self.fleet.lane_navigation.telemetry(name).get('fresh'):
+                return f'{name}: 로봇 상태 수신 재확인 중'
+        return ''
+
+    @staticmethod
+    def _lane_released(status, request):
+        return (status.get('fresh') and status.get('mission_id') == request.mission_id
+                and status.get('active') is False and status.get('cleanup_ok') is True
+                and status.get('mode') == 'STOP' and status.get('permission_enabled') is False)
+
+    def _retry_task(self, role, now):
+        task, f = self.tasks[role], self.fleet
+        name, request = self.plan[role.lower()], task['request']
+        current = f.requests.get(name)
+        if current is not None and current is not request:
+            self.detail = f'복구 대기 · {name}: 다른 목표 정리 필요'
+            return False
+        if request is None:
+            if task['kind'] == 'LANE' and not self._lane_start_ready(name):
+                return False
+            return self._submit_task(role)
+        client = f.navigation if task['kind'] == 'NAV' else f.lane_navigation
+        state = client.state(name)
+        status = f.lane_navigation.telemetry(name)
+        # A result may arrive while the fleet is held. Preserve that success;
+        # never resend a waypoint which Nav2 already completed.
+        completed = request.phase == 'SUCCEEDED' or (
+            state == 'SUCCEEDED' and (request.delivered if task['kind'] == 'NAV' else request.lane_sent))
+        if (task['kind'] == 'LANE' and task.get('finish_sent') is not None
+                and status.get('state') == 'COMPLETE' and self._lane_released(status, request)):
+            completed = True  # Matched robot success report recovers a lost action response.
+        if completed:
+            request.phase = 'SUCCEEDED'
+            if task['kind'] == 'LANE' and not self._lane_released(status, request):
+                return False
+            if f.requests.get(name) is request:
+                f.requests.pop(name)
+            self._hold(name, 'DEMO_STEP_COMPLETE')
+            return True
+        if task['kind'] == 'LANE' and task.get('finish_sent') is not None:
+            if status.get('active') is True and status.get('mission_id') == request.mission_id:
+                f.node.publish_lane_finish(name)
+                task['finish_sent'] = now
+            self.detail = f'복구 대기 · {name}: 차선 완료 응답/STOP·허가 OFF 재확인'
+            return False
+        retry = (task.get('retry_requested') or now - task['started'] > 900.
+                 or request.phase == 'LANE_FAILED'
+                 or state in {'ABORTED', 'REJECTED', 'CANCELED', 'ERROR', 'UNAVAILABLE'}
+                 or current is None)
+        if not retry:
+            return True
+        if state in {'ACTIVE', 'PENDING', 'WAITING_FOR_LANE', 'FOLLOWING', 'SAFETY_HOLD',
+                     'STOPPING', 'CANCELLING'}:
+            if state not in {'STOPPING', 'CANCELLING'}:
+                client.cancel_goal(name)
+            return False  # Wait for the old action to end before sending another.
+        if task['kind'] == 'LANE':
+            if not self._lane_start_ready(name):
+                return False
+            if current is request:
+                f.requests.pop(name)
+            if not self._submit_task(role):
+                return False
+        else:
+            f.requests[name] = request
+            if not f._send_request(request):
+                return False
+        task['started'] = now
+        task.pop('retry_requested', None)
+        task['retries'] += 1
+        return True
+
+    def _lane_start_ready(self, name):
+        status = self.fleet.lane_navigation.telemetry(name)
+        ready = (status.get('fresh') and status.get('active') is False
+                 and status.get('mode') == 'STOP' and status.get('permission_enabled') is False
+                 and status.get('cleanup_ok') is True and status.get('ready') is True
+                 and isinstance(status.get('exit_status'), dict)
+                 and status['exit_status'].get('version') == 1)
+        if not ready:
+            self.detail = f'복구 대기 · {name}: 차선 시작 점검/STOP·허가 OFF 재확인'
+        return ready
+
+    def _recover(self, now):
+        recovery = self.recovering
+        if recovery['healthy_since'] is None:
+            recovery['healthy_since'] = now
+        if (now - recovery['healthy_since'] < RECOVERY_STABLE_S
+                or now - recovery['last_attempt'] < RECOVERY_DELAY_S):
+            return False
+        recovery['last_attempt'] = now
+        for role in tuple(self.tasks):
+            if not self._retry_task(role, now):
+                return False
+        self.recovering = None
+        for role, task in self.tasks.items():
+            request = task['request']
+            if request.phase != 'SUCCEEDED':
+                self.fleet._request_drive_mode(self.plan[role.lower()],
+                    'NAV2' if task['kind'] == 'NAV' else self.fleet._autonomous_mode_for(request.robot_name))
+        self.detail = '복구 확인 완료 · 이전 구간 이어서 진행'
+        self.fleet._apply_motion_policy()
+        self.fleet.node.publish_permits_now()
+        return True
 
     def _task_complete(self, role, now):
         task = self.tasks.get(role)
@@ -194,49 +352,52 @@ class TwoRobotDemo:
             return True
         f, name = self.fleet, self.plan[role.lower()]
         request = task['request']
+        if request is None:
+            self.wait_for_recovery(f'{name}: 목표 전송 재확인')
+            return False
         if request.paused or name in f.blocked_robots:
             self.exits[role].reset()
             return False
         if request.phase == 'SUCCEEDED':
             if task['kind'] == 'LANE':
                 status = f.lane_navigation.telemetry(name)
-                if not (status.get('fresh') and status.get('mission_id') == request.mission_id
-                        and status.get('active') is False and status.get('cleanup_ok') is True
-                        and status.get('mode') == 'STOP' and status.get('permission_enabled') is False):
+                if not self._lane_released(status, request):
                     if now - task.setdefault('cleanup_wait', now) > 5.:
-                        self.cancel('차선 종료 후 STOP·허가 해제 확인 실패', failed=True)
+                        self.wait_for_recovery('차선 종료 후 STOP·허가 해제 재확인')
                     return False
-            elif not f.node.arrival_is_close(name, task['goal']):
-                self.cancel(f'{name}: Nav2 도착 위치/방향 불일치', failed=True)
-                return False
+            # NavigateToPose success is the sole Nav2 arrival decision.
+            # The fleet still enforces fresh localization and bottleneck permits.
+            if f.requests.get(name) is request:
+                f.requests.pop(name)
             self._hold(name, 'DEMO_STEP_COMPLETE')
             del self.tasks[role]
             return True
         if f.requests.get(name) is not request:
-            self.cancel(f'{name}: 시연 목표 변경/취소 감지', failed=True)
+            self.wait_for_recovery(f'{name}: 시연 목표 변경/취소 재확인')
             return False
         state = (f.navigation if task['kind'] == 'NAV' else f.lane_navigation).state(name)
         if (request.phase == 'LANE_FAILED'
-                or state in {'ABORTED', 'REJECTED', 'CANCELED', 'ERROR'}
+                or state in {'ABORTED', 'REJECTED', 'CANCELED', 'ERROR', 'UNAVAILABLE'}
                 and name not in f.blocked_robots):
-            self.cancel(f'{name}: {state} / {request.phase}', failed=True)
+            self.wait_for_recovery(f'{name}: {state} / {request.phase}')
             return False
         if now - task['started'] > 900.:
-            self.cancel(f'{name}: 구간 제한 시간 15분 초과', failed=True)
+            task['retry_requested'] = True
+            self.wait_for_recovery(f'{name}: 구간 제한 시간 15분 초과 · 같은 구간 재시도')
             return False
         if task['kind'] == 'LANE':
             status = f.lane_navigation.telemetry(name)
             allowed = (name not in f.blocked_robots and name not in f.sequence_holds
                        and request.phase in {'LANE_ACTIVE', 'SAFETY_HOLD'}
                        and status.get('mission_id') == request.mission_id)
-            reason = self.exits[role].evaluate(now, f.lane_navigation.current_localization(name),
+            reason = self.exits[role].evaluate(now, self._current_pose(name),
                         self.plan[role.lower() + '_exit'], status, allowed)
             if reason and task['finish_sent'] is None:
                 f.node.publish_lane_finish(name)
                 task['finish_sent'] = now
                 self.detail = f'{role}: {reason} · STOP 확인 중'
             if task['finish_sent'] is not None and now - task['finish_sent'] > 5.:
-                self.cancel(f'{name}: 차선 종료 응답 시간 초과', failed=True)
+                self.wait_for_recovery(f'{name}: 차선 종료 응답 재확인')
         return False
 
     def tick(self):
@@ -250,18 +411,21 @@ class TwoRobotDemo:
             for condition in self.exits.values():
                 condition.reset()
             return
-        for role in ('A', 'B'):
-            name = self.plan[role.lower()]
-            if (not f.node.heartbeat_is_fresh(name)
-                    or f.lane_navigation.current_localization(name) is None):
-                self.cancel(f'{name}: heartbeat 또는 AMCL 유효성 상실', failed=True)
-                return
+        reason = self._health_error()
+        if reason:
+            self.wait_for_recovery(reason)
+            self.recovering['healthy_since'] = None
+            return
+        if self.recovering and not self._recover(now):
+            return
         if self.stage == 'A_LANE' and self._task_complete('A', now) and self.active:
             self.stage, self.detail = 'NAV_ROUTES', 'A·B Nav2 waypoint 진행'
         if self.stage == 'NAV_ROUTES':
             for role in ('A', 'B'):
+                if self.recovering:
+                    return
                 task = self.tasks.get(role)
-                if not self._task_complete(role, now) or not self.active:
+                if not self._task_complete(role, now) or not self.active or self.recovering:
                     continue
                 if task is not None:
                     self.done[role].append(task['goal'])
@@ -271,19 +435,19 @@ class TwoRobotDemo:
                     self.route_done.add(role)
                 else:
                     self.detail = f'{role}: 다음 waypoint 또는 목록 확정 대기'
-            if self.active and len(self.route_done) == 2:
+            if self.active and not self.recovering and len(self.route_done) == 2:
                 self.stage, self.detail = 'FINAL', 'A 최종 목적지 · B 차선 입구'
                 self._nav('A', self.plan['a_final'])
                 if self.active:
                     self._nav('B', self.plan['b_entry'])
         elif self.stage == 'FINAL':
             self._task_complete('A', now)
-            if self.active and self._task_complete('B', now):
+            if self.active and not self.recovering and self._task_complete('B', now):
                 self.stage, self.detail = 'B_LANE', 'B 차선 주행 · A 최종 도착 확인'
                 self._lane('B')
         elif self.stage == 'B_LANE':
             a_done = self._task_complete('A', now)
-            b_done = self._task_complete('B', now) if self.active else False
+            b_done = self._task_complete('B', now) if self.active and not self.recovering else False
             if self.active and a_done and b_done:
                 self.active, self.stage, self.detail = False, 'COMPLETE', 'A·B 최종 도착 · STOP/HOLD'
                 f.pause()

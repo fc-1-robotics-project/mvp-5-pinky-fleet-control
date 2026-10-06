@@ -5,7 +5,7 @@ import json
 import tkinter as tk
 from tkinter import ttk
 
-from .demo_mission import POSES, save_plan, validate_plan
+from .demo_mission import EXIT_DWELL_S, EXIT_RADIUS_M, POSES, save_plan, validate_plan
 from .lane_routes import validate_pose
 from .robot_config import ROBOTS
 
@@ -26,7 +26,7 @@ class DemoPanel:
         body.columnconfigure(0, weight=1)
         self.plan = dict(version=1, map_key='', waypoints={'A': [], 'B': []},
                          closed={'A': False, 'B': False})
-        self.status = tk.StringVar(value='지도 좌표를 입력하고 좌표 반영을 누르세요. 종료 기준: 7cm / 실제 정지 3초')
+        self.status = tk.StringVar(value='지도 좌표를 입력하고 좌표 반영을 누르세요.')
         self.fixed_inputs, self.file_buttons = [], []
         self.pose_buttons, self.capture_buttons, self.pose_inputs, self.queue_buttons = {}, {}, {}, {}
         roles = ttk.Frame(body)
@@ -53,6 +53,9 @@ class DemoPanel:
             button = ttk.Button(coordinates, text='좌표 반영', command=lambda f=field: self._run(lambda: self._apply(f)))
             button.grid(row=row, column=5)
             self.pose_buttons[field] = button
+        ttk.Label(coordinates, text=(f'차선 끝 반경 {EXIT_RADIUS_M * 100:g}cm 안에서 '
+                  f'{EXIT_DWELL_S:g}초 도착 확인 → 차선 종료 (차선 유무·정지 대기 불필요)')).grid(
+                      row=len(POSES), column=0, columnspan=6, sticky='w', pady=4)
         queue = ttk.LabelFrame(body, text='Nav2 대기 목록 · 각 점 도착 후 다음 점 전송', padding=5)
         queue.grid(row=2, column=0, sticky='nsew')
         body.rowconfigure(2, weight=1)
@@ -261,7 +264,8 @@ class DemoPanel:
             rows += [(f'done:{i}', '완료', p) for i, p in enumerate(self.demo.done[role])]
             task = self.demo.tasks.get(role)
             if task and task['kind'] == 'NAV':
-                rows.append(('current', task['request'].phase, task['goal']))
+                phase = task['request'].phase if task['request'] is not None else '목표 전송 재확인'
+                rows.append(('current', phase, task['goal']))
         rows += [(f'pending:{i}', '대기', p) for i, p in enumerate(queues[role])]
         signature = repr((role, rows, closed[role]))
         if force or signature != self._signature:

@@ -428,7 +428,12 @@ class FleetCoordinator:
             if runtime.owner and not self.node.pose_is_fresh(runtime.owner):
                 runtime.state = 'LOCKED'
                 runtime.detail = f'{runtime.owner} pose stale'
-                self.emergency_stop('OWNER_POSE_STALE')
+                if self.sequence is not None and self.sequence.active:
+                    # Keep the observed owner/lease while localization recovers.
+                    self.sequence.wait_for_recovery(f'{runtime.owner}: 병목 점유 위치 재확인')
+                    self.sequence.recovering['healthy_since'] = None
+                else:
+                    self.emergency_stop('OWNER_POSE_STALE')
                 return False
 
             overlapping = [
@@ -545,6 +550,11 @@ class FleetCoordinator:
         for robot in ROBOTS:
             name = robot.name
             request = self.requests.get(name)
+            if self.sequence is not None and self.sequence.active and self.sequence.recovering:
+                self._request_drive_mode(name, 'STOP')
+                self.node.set_gate_mode(name, FleetPermit.MODE_HOLD, reason='DEMO_RECOVERY')
+                self.robot_details[name] = 'HOLD · ' + self.sequence.detail
+                continue
             if name in self.sequence_holds:
                 self.node.set_gate_mode(name, FleetPermit.MODE_HOLD, reason=self.sequence_holds[name])
                 self.robot_details[name] = 'HOLD · ' + self.sequence_holds[name]
@@ -645,6 +655,8 @@ class FleetCoordinator:
 
     def _refresh_navigation_requests(self) -> None:
         """Retry retained goals and discard goals that have completed."""
+        if self.sequence is not None and self.sequence.active and self.sequence.recovering:
+            return  # Only the sequence retries after its health recheck/cooldown.
         for name, request in list(self.requests.items()):
             if request.paused:
                 continue

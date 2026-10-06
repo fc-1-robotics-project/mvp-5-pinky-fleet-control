@@ -124,3 +124,81 @@ def test_delayed_new_exit_status_cannot_be_freshened_by_network_receipt():
     c._mission_status['status_time_s'] = 100.5
     assert c.telemetry()['fresh']
     assert c.telemetry()['received_age_s'] == .5
+
+
+def pose_client(position_variance=.25, yaw_variance=None):
+    import math
+    import time
+    c = client()
+    covariance = [0.] * 36
+    covariance[0] = covariance[7] = position_variance
+    covariance[35] = math.radians(15.) ** 2 if yaw_variance is None else yaw_variance
+    message = SimpleNamespace(header=SimpleNamespace(frame_id='map', stamp=SimpleNamespace(sec=101, nanosec=0)),
+        pose=SimpleNamespace(covariance=covariance, pose=SimpleNamespace(position=SimpleNamespace(x=1., y=2.),
+             orientation=SimpleNamespace(x=0., y=0., z=0., w=1.))))
+    c.node = SimpleNamespace(get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=101_000_000_000)))
+    c._fleet_localization = (time.monotonic(), message)
+    return c
+
+
+def demo_limits():
+    from multibot_control_ui.demo_mission import POSE_POSITION_VARIANCE_LIMIT, POSE_YAW_VARIANCE_LIMIT
+    return dict(position_variance_limit=POSE_POSITION_VARIANCE_LIMIT,
+                yaw_variance_limit=POSE_YAW_VARIANCE_LIMIT)
+
+
+def test_manual_initial_pose_variance_is_accepted_by_demo_without_rewriting_covariance():
+    from vision_control.lane_client import FleetLaneClients
+    c = pose_client()
+    original = list(c._fleet_localization[1].pose.covariance)
+    assert c.current_localization() is None  # Legacy callers retain the stricter default.
+    fleet = FleetLaneClients.__new__(FleetLaneClients)
+    fleet.clients = {'robot1': c}
+    assert fleet.current_localization('robot1', **demo_limits()) == (1., 2., 0.)
+    assert fleet.localization_status('robot1', **demo_limits())['reason'] == '위치 수신 정상'
+    assert c._fleet_localization[1].pose.covariance == original
+
+
+def test_demo_covariance_bounds_have_specific_reasons_and_remain_bounded():
+    import math
+    c = pose_client(.30, math.radians(20.) ** 2)
+    assert c.current_localization(**demo_limits()) is not None
+    covariance = c._fleet_localization[1].pose.covariance
+    covariance[7] = .30001
+    assert c.current_localization(**demo_limits()) is None
+    assert '위치 분산 범위 초과' in c.localization_status(**demo_limits())['reason']
+    assert '0.300m²' in c.localization_status(**demo_limits())['reason']
+    covariance[7] = .25
+    covariance[35] = math.radians(20.01) ** 2
+    assert c.current_localization(**demo_limits()) is None
+    assert '방향 분산 범위 초과' in c.localization_status(**demo_limits())['reason']
+
+
+def test_relaxed_demo_limits_do_not_accept_stale_invalid_or_unknown_localization():
+    import math
+    import time
+    for fault in ('missing', 'received_stale', 'source_stale', 'future', 'frame',
+                  'nan_position', 'bad_quaternion', 'negative_variance', 'nan_variance'):
+        c = pose_client()
+        message = c._fleet_localization[1]
+        if fault == 'missing':
+            c._fleet_localization = None
+        elif fault == 'received_stale':
+            c._fleet_localization = (time.monotonic()-1.6, message)
+        elif fault == 'source_stale':
+            message.header.stamp.sec = 99
+        elif fault == 'future':
+            message.header.stamp.sec = 102
+        elif fault == 'frame':
+            message.header.frame_id = 'odom'
+        elif fault == 'nan_position':
+            message.pose.pose.position.x = math.nan
+        elif fault == 'bad_quaternion':
+            message.pose.pose.orientation.w = 0.
+        elif fault == 'negative_variance':
+            message.pose.covariance[0] = -.1
+        elif fault == 'nan_variance':
+            message.pose.covariance[35] = math.nan
+        status = c.localization_status(**demo_limits())
+        assert status['pose'] is None, fault
+        assert status['reason'], fault
