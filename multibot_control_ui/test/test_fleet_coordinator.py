@@ -16,6 +16,11 @@ class FakeNode:
         self.runtime_zone_clearance_margin_m = 0.01
         self.modes = {}
         self.permit_count = 0
+        self.drive_modes = {}
+        self.manual_routing = {}
+        self.initial_poses = []
+        self.lane_exit_position_variance = 0.0025
+        self.lane_exit_yaw_variance = 0.0012
 
     def heartbeat_is_fresh(self, robot_name):
         return self.heartbeat_fresh[robot_name]
@@ -45,6 +50,15 @@ class FakeNode:
     def publish_permits_now(self):
         self.permit_count += 1
 
+    def request_drive_mode(self, robot_name, mode):
+        self.drive_modes[robot_name] = mode
+
+    def set_manual_routing(self, robot_name, enabled):
+        self.manual_routing[robot_name] = enabled
+
+    def publish_initial_pose(self, robot_name, x, y, yaw, **kwargs):
+        self.initial_poses.append((robot_name, x, y, yaw, kwargs))
+
 
 class FakeNavigation:
 
@@ -69,6 +83,37 @@ class FakeNavigation:
 
     def status(self, robot_name):
         return self.states[robot_name]
+
+    def state(self, robot_name):
+        return self.states[robot_name]
+
+
+class FakeLaneNavigation:
+
+    def __init__(self):
+        self.sent = []
+        self.cancelled = []
+        self.states = {'robot1': 'READY', 'robot2': 'READY'}
+        self.localized = True
+        self.reset_names = []
+
+    def mark_localization_reset(self, robot_name):
+        self.reset_names.append(robot_name)
+
+    def localization_ready(self, robot_name, after, target):
+        return self.localized
+
+    def send_goal(self, robot_name, mission_id, route_id, **kwargs):
+        self.sent.append((robot_name, mission_id, route_id))
+        self.states[robot_name] = 'PENDING'
+        return True
+
+
+
+    def cancel_goal(self, robot_name):
+        self.cancelled.append(robot_name)
+        self.states[robot_name] = 'CANCELED'
+        return True
 
     def state(self, robot_name):
         return self.states[robot_name]
@@ -266,6 +311,91 @@ def test_manual_selection_enables_control_and_run_gate() -> None:
     assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
 
 
+def test_manual_toggle_preserves_active_navigation_goal() -> None:
+    coordinator, node, navigation = make_coordinator()
+    coordinator.submit_goal('robot1', 2.0, 0.25, 0.0)
+
+    assert coordinator.toggle_manual('robot1')[0]
+    assert 'robot1' in coordinator.requests
+    assert navigation.cancelled == []
+    assert node.manual_routing['robot1']
+
+    assert coordinator.toggle_manual('robot1')[0]
+    assert 'robot1' in coordinator.requests
+    assert not node.manual_routing['robot1']
+
+
+def test_nav_arrival_runs_lane_then_reseeds_amcl_with_low_covariance() -> None:
+    node = FakeNode()
+    navigation = FakeNavigation()
+    lane = FakeLaneNavigation()
+    coordinator = FleetCoordinator(node, navigation, [], lane_navigation=lane)
+    assert coordinator.start()[0]
+    accepted, _ = coordinator.submit_lane_entry_goal(
+        'robot1', 1.0, 2.0, 90.0, (3.0, 4.0, -90.0),
+    )
+    assert accepted
+
+    navigation.states['robot1'] = 'SUCCEEDED'
+    coordinator.tick()
+    request = coordinator.requests['robot1']
+    assert request.phase == 'WAITING_FOR_LANE'
+    assert lane.sent[-1][0] == 'robot1'
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+
+    lane.states['robot1'] = 'FOLLOWING'
+    coordinator.tick()
+    assert coordinator.requests['robot1'].phase == 'LANE_ACTIVE'
+    assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
+
+    lane.states['robot1'] = 'SUCCEEDED'
+    coordinator.tick()
+    request = coordinator.requests['robot1']
+    assert request.phase == 'RELOCALIZING'
+    assert node.initial_poses[-1][:4] == ('robot1', 3.0, 4.0, -90.0)
+    assert node.initial_poses[-1][4] == {
+        'position_variance': 0.0025,
+        'yaw_variance': 0.0012,
+    }
+    request.transition_started -= 1.1
+    coordinator.tick()
+    assert 'robot1' not in coordinator.requests
+    assert node.drive_modes['robot1'] == 'NAV2'
+
+
+def test_lane_completion_does_not_steal_manual_override() -> None:
+    node = FakeNode()
+    navigation = FakeNavigation()
+    lane = FakeLaneNavigation()
+    coordinator = FleetCoordinator(node, navigation, [], lane_navigation=lane)
+    assert coordinator.start()[0]
+    assert coordinator.submit_lane_entry_goal(
+        'robot1', 1.0, 2.0, 90.0, (3.0, 4.0, -90.0),
+    )[0]
+    navigation.states['robot1'] = 'SUCCEEDED'
+    coordinator.tick()
+    lane.states['robot1'] = 'FOLLOWING'
+    coordinator.tick()
+
+    assert coordinator.toggle_manual('robot1')[0]
+    lane.states['robot1'] = 'SUCCEEDED'
+    coordinator.tick()
+    request = coordinator.requests['robot1']
+    assert request.phase == 'RELOCALIZING'
+    assert node.drive_modes['robot1'] == 'MANUAL'
+
+    request.transition_started -= 1.1
+    coordinator.tick()
+    assert 'robot1' in coordinator.requests
+    assert node.drive_modes['robot1'] == 'MANUAL'
+
+    assert coordinator.toggle_manual('robot1')[0]
+    assert node.drive_modes['robot1'] == 'STOP'
+    coordinator.tick()
+    assert 'robot1' not in coordinator.requests
+    assert node.drive_modes['robot1'] == 'NAV2'
+
+
 def test_missing_heartbeat_holds_only_that_robot() -> None:
     node = FakeNode()
     node.heartbeat_fresh['robot2'] = False
@@ -331,3 +461,170 @@ def test_same_tick_entry_selects_one_owner_without_estop() -> None:
     assert runtime.owner == 'robot1'
     assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
     assert node.modes['robot2'][0] == FleetPermit.MODE_HOLD
+
+
+def test_lane_only_start_and_finish_never_send_nav_or_reset_amcl() -> None:
+    node, navigation, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    coordinator = FleetCoordinator(node, navigation, [], lane_navigation=lane)
+    assert coordinator.submit_lane_test('robot1')[0]
+    assert navigation.sent == []
+    assert coordinator.requests['robot1'].lane_duration_sec == 900.0
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    lane.states['robot1'] = 'FOLLOWING'
+    coordinator.tick()
+    assert node.drive_modes['robot1'] == 'LANE'
+    assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
+    lane.states['robot1'] = 'SUCCEEDED'
+    coordinator.tick()
+    assert node.drive_modes['robot1'] == 'STOP'
+    assert 'robot1' not in coordinator.requests
+    assert node.initial_poses == []
+    assert navigation.sent == []
+
+
+def test_lane_only_pause_and_heartbeat_recovery_do_not_reissue_nav() -> None:
+    node, navigation, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    coordinator = FleetCoordinator(node, navigation, [], lane_navigation=lane)
+    assert coordinator.submit_lane_test('robot1')[0]
+    lane.states['robot1'] = 'FOLLOWING'
+    coordinator.tick()
+    coordinator.pause()
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    coordinator.start()
+    node.heartbeat_fresh['robot1'] = False
+    coordinator.tick()
+    assert coordinator.requests['robot1'].phase == 'LANE_ACTIVE'
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    node.heartbeat_fresh['robot1'] = True
+    coordinator.tick()
+    assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
+    assert navigation.sent == []
+
+
+def test_lane_test_estop_requires_explicit_cancel_and_restart() -> None:
+    node, navigation, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    coordinator = FleetCoordinator(node, navigation, [], lane_navigation=lane)
+    assert coordinator.submit_lane_test('robot1')[0]
+    assert not coordinator.submit_lane_test('robot1')[0]
+    coordinator.emergency_stop()
+    coordinator.start()
+    assert coordinator.requests['robot1'].phase == 'LANE_FAILED'
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    assert navigation.sent == []
+    coordinator.cancel_robot('robot1')
+    assert coordinator.submit_lane_test('robot1')[0]
+
+
+def test_continuous_mission_requires_localization_before_next_nav_goal():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    assert c.submit_lane_entry_goal('robot1', 1., 2., 90., (3., 4., -90.),
+                                    route_id='B_to_A', next_goal=(5., 6., 0.))[0]
+    nav.states['robot1'] = 'SUCCEEDED'
+    c.tick()
+    lane.states['robot1'] = 'FOLLOWING'
+    c.tick()
+    lane.localized = False
+    lane.states['robot1'] = 'SUCCEEDED'
+    c.tick()
+    assert len(nav.sent) == 1
+    assert c.requests['robot1'].phase == 'RELOCALIZING'
+    c.tick()
+    assert len(nav.sent) == 1
+    lane.localized = True
+    c.tick()
+    assert nav.sent[-1] == ('robot1', 5., 6., 0.)
+    assert not c.requests['robot1'].lane_after_arrival
+
+
+def test_localization_timeout_never_dispatches_next_goal():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    c.submit_lane_entry_goal('robot1', 1., 2., 90., (3., 4., 0.), next_goal=(5., 6., 0.))
+    nav.states['robot1'] = 'SUCCEEDED'
+    c.tick()
+    lane.localized = False
+    lane.states['robot1'] = 'SUCCEEDED'
+    c.tick()
+    c.requests['robot1'].transition_started -= 21.
+    c.tick()
+    assert c.requests['robot1'].phase == 'LANE_FAILED'
+    assert len(nav.sent) == 1
+    assert node.drive_modes['robot1'] == 'STOP'
+
+
+def test_operator_pause_preserves_lane_and_does_not_reissue_nav():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    c.submit_lane_test('robot1')
+    lane.states['robot1'] = 'FOLLOWING'
+    c.tick()
+    c.pause_robot('robot1', True)
+    c.tick()
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    c.pause_robot('robot1', False)
+    c.tick()
+    assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
+    assert not nav.sent
+
+
+def test_estop_during_continuous_lane_requires_explicit_new_mission():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    c.submit_lane_entry_goal('robot1', 1., 2., 90., (3., 4., 0.), next_goal=(5., 6., 0.))
+    nav.states['robot1'] = 'SUCCEEDED'
+    c.tick()
+    lane.states['robot1'] = 'FOLLOWING'
+    c.tick()
+    c.emergency_stop()
+    c.start()
+    c.tick()
+    assert c.requests['robot1'].phase == 'LANE_FAILED'
+    assert len(nav.sent) == 1
+    assert not c.submit_goal('robot1', 9., 9., 0.)[0]
+
+
+def test_stopping_lane_cannot_be_reactivated_by_feedback():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    c.submit_lane_test('robot1')
+    lane.states['robot1'] = 'STOPPING'
+    c.tick()
+    assert c.requests['robot1'].phase == 'LANE_STOPPING'
+    assert node.drive_modes['robot1'] == 'STOP'
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+
+
+def test_selected_resume_does_not_override_global_pause_or_estop():
+    node, nav, lane = FakeNode(), FakeNavigation(), FakeLaneNavigation()
+    c = FleetCoordinator(node, nav, [], lane_navigation=lane)
+    c.submit_lane_test('robot1')
+    lane.states['robot1'] = 'FOLLOWING'
+    c.tick()
+    c.pause()
+    c.pause_robot('robot1', False)
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    c.emergency_stop()
+    c.pause_robot('robot1', False)
+    assert node.modes['robot1'][0] == FleetPermit.MODE_ESTOP
+
+
+def test_pause_and_cancel_cannot_release_emergency_stop():
+    coordinator, node, navigation = make_coordinator()
+    assert coordinator.submit_goal('robot1', 2., .25, 0.)[0]
+    assert coordinator.submit_goal('robot2', -1., .25, 180.)[0]
+    coordinator.emergency_stop()
+    sent = list(navigation.sent)
+    coordinator.pause()
+    coordinator.cancel_robot('robot1')
+    coordinator.tick()
+    assert coordinator.emergency and not coordinator.enabled
+    assert all(value[0] == FleetPermit.MODE_ESTOP for value in node.modes.values())
+    assert navigation.sent == sent
+    assert 'robot1' not in coordinator.requests
+    assert coordinator.requests['robot2'].phase == 'E_STOP_HOLD'
+    # Explicit RUN still resumes retained independent Nav2 goals.
+    coordinator.start()
+    assert not coordinator.emergency
+    assert len(navigation.sent) == len(sent) + 1
+    assert navigation.sent[-1][0] == 'robot2'

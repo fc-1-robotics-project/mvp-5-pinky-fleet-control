@@ -1,5 +1,7 @@
 # 기여 가이드
 
+공유 설치·실행 기준은 [TEAM_LANE_GUIDE.md](TEAM_LANE_GUIDE.md)와 [UI_INTEGRATION.md](UI_INTEGRATION.md)입니다. 현장 공유 브랜치는 `codex/lane-field-20261001`이며, 아래는 별도 신규 개발 작업의 일반 흐름입니다.
+
 ## 기본 작업 흐름
 
 `main`에서 직접 개발하지 않고 작업별 브랜치를 사용한다.
@@ -30,7 +32,7 @@ Request에는 한 가지 목적의 변경만 포함한다.
 cd ~/colcon_ws
 source /opt/ros/jazzy/setup.bash
 colcon build --symlink-install --packages-select \
-  pinky_interfaces multibot_control_ui
+  pinky_interfaces vision_control multibot_control_ui
 
 source install/setup.bash
 cd src/pinky-fleet-control/multibot_control_ui
@@ -42,9 +44,9 @@ pytest -q
 ```bash
 git status
 git diff
-git add <변경한 파일>
+git add multibot_control_ui/multibot_control_ui/control_ui.py  # 실제 수정 파일 선택
 git commit -m "간결한 변경 목적"
-git push -u origin <브랜치 이름>
+git push -u origin HEAD
 ```
 
 Pull Request에는 변경 목적, 주요 변경점, 실행한 테스트, 실제 로봇 검증 여부를 적는다.
