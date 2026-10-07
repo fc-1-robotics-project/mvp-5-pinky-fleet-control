@@ -2,6 +2,7 @@
 
 import math
 import hashlib
+import json
 import signal
 from pathlib import Path
 import tkinter as tk
@@ -10,10 +11,13 @@ from typing import Optional, Tuple
 
 import rclpy
 from std_srvs.srv import SetBool
+from pinky_interfaces.msg import FleetPermit
 from vision_control.lane_client import FleetLaneClients
 
 from .control_node import create_node, FleetControlNode
 from .fleet_coordinator import FleetCoordinator
+from .demo_mission import TwoRobotDemo, validate_plan
+from .demo_panel import DemoPanel, LABELS as DEMO_LABELS
 from .map_math import grid_to_world, occupancy_color, quaternion_to_yaw
 from .map_math import world_to_grid
 from .navigation_client import FleetNavigationClients
@@ -46,6 +50,8 @@ class MultiBotControlUI:
         self.node = node
         self.navigation = navigation
         self.coordinator = coordinator
+        self.demo = TwoRobotDemo(coordinator)
+        self.demo_panel = None
         self.lane_navigation = lane_navigation
         self.root = tk.Tk()
         self.root.title('Pinky Pro Multi-Robot Control')
@@ -53,9 +59,18 @@ class MultiBotControlUI:
         self.root.configure(background='#0b1220')
         self._configure_styles()
 
+        self.demo_path = Path.home() / '.config/pinky_fleet_control/two_robot_demo.json'
+        self.demo_ready = tk.BooleanVar(value=False)
+        self.demo_config_status = tk.StringVar()
+        self.demo_status = tk.StringVar()
+        self.demo_config_valid = False
+        self.demo_error = ''
+        self.demo_buttons = {}
+        self._refresh_demo_configuration()
+
         self.selected_robot = tk.StringVar(value='')
         self.routing_status = tk.StringVar(
-            value='/cmd_vel 대기 중 - 먼저 로봇을 선택하세요.',
+            value='작업할 로봇을 선택하세요.',
         )
         self.map_status = tk.StringVar(value='맵 수신 대기 중')
         self.robot_status = {
@@ -73,7 +88,7 @@ class MultiBotControlUI:
             for robot in ROBOTS
         }
         self.initial_pose_status = tk.StringVar(
-            value='지도 선택 → 위치·방향 드래그 → 로봇별 설정. 직접 입력도 가능합니다.',
+            value='지도 선택 → 위치·방향 드래그 → 초기 위치 적용. 직접 입력도 가능합니다.',
         )
         self.goal_status = tk.StringVar(
             value='로봇 선택 후 지도에서 클릭하고 진행 방향으로 드래그하세요.',
@@ -92,6 +107,8 @@ class MultiBotControlUI:
         self.field_ready = tk.BooleanVar(value=False)
         self.map_capture = None
         self.lane_buttons = {}
+        self.initial_pose_buttons = {}
+        self.fleet_buttons = {}
         self._load_route_fields()
         self.fleet_status = tk.StringVar(value=coordinator.summary)
         self.gate_status = tk.StringVar(value='로봇 gate heartbeat 수신 대기 중')
@@ -126,6 +143,103 @@ class MultiBotControlUI:
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
         self.root.after(ROS_POLL_INTERVAL_MS, self._poll_ros)
         self.root.after(UI_REFRESH_INTERVAL_MS, self._refresh_ui)
+
+    def _open_demo_panel(self):
+        self._refresh_demo_configuration()
+        if self.demo_panel is None or not self.demo_panel.window.winfo_exists():
+            self.demo_panel = DemoPanel(self)
+        else:
+            self.demo_panel.window.lift()
+
+    def _read_demo_configuration(self):
+        return validate_plan(json.loads(self.demo_path.read_text()))
+
+    def _refresh_demo_configuration(self):
+        self.demo_ready.set(False)
+        self.demo_config_valid = False
+        try:
+            plan = self._read_demo_configuration()
+        except FileNotFoundError:
+            self.demo_config_status.set('설정 창에서 좌표·waypoint를 저장하세요.')
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            self.demo_config_status.set(f'설정 확인 필요 · {error}')
+        else:
+            self.demo_config_valid = True
+            self.demo_config_status.set(
+                f"저장된 설정 · A={plan['a']} / B={plan['b']} · "
+                f"Nav2 waypoint A {len(plan['waypoints']['A'])}개 / B {len(plan['waypoints']['B'])}개")
+        self.demo_error = ''
+
+    def _start_demo(self):
+        try:
+            if not self.demo_ready.get():
+                raise ValueError('두 로봇 현장 확인 체크 후 시작하세요.')
+            # The editor can be closed; only explicitly saved configuration starts a run.
+            self.demo.start(self._read_demo_configuration(), self._map_key())
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            self.demo_error = f'시작 실패 · {error}'
+        else:
+            self.demo_ready.set(False)
+            self.demo_error = ''
+            self._cancel_map_capture()
+            self.node.clear_selection()
+        self._refresh_demo_controls()
+
+    def _pause_demo(self):
+        if not self.demo.active or self.coordinator.emergency:
+            return
+        if self.coordinator.enabled:
+            self.coordinator.pause()
+            self.demo_error = ''
+        else:
+            started, detail = self.coordinator.start()
+            self.demo_error = '' if started else detail
+        self._refresh_demo_controls()
+
+    def _cancel_demo(self):
+        self.demo.cancel()
+        self.demo_ready.set(False)
+        self.demo_error = ''
+        self._refresh_demo_controls()
+
+    def _build_demo_controls(self, controls, row):
+        panel = ttk.LabelFrame(controls, text='두 로봇 통합 시연', padding=8)
+        panel.grid(row=row, column=0, columnspan=2, sticky='ew', pady=8)
+        for column in range(3):
+            panel.columnconfigure(column, weight=1)
+        ttk.Button(panel, text='통합 시연 설정 · waypoint 편집',
+                   command=self._open_demo_panel).grid(row=0, column=0, columnspan=3, sticky='ew')
+        ttk.Label(panel, textvariable=self.demo_config_status, wraplength=480).grid(
+            row=1, column=0, columnspan=3, sticky='w', pady=4)
+        ttk.Label(panel, text='마지막으로 저장한 설정으로 실행합니다.').grid(
+            row=2, column=0, columnspan=3, sticky='w')
+        ttk.Checkbutton(panel, text='두 로봇 배치·코스 확인·현장 감시·즉시 정지 가능',
+                        variable=self.demo_ready, command=self._refresh_demo_controls).grid(
+                            row=3, column=0, columnspan=3, sticky='w', pady=5)
+        for column, (key, label, command) in enumerate((
+                ('start', '통합 시연 시작', self._start_demo),
+                ('pause', '시연 일시정지', self._pause_demo),
+                ('cancel', '시연 중단', self._cancel_demo))):
+            button = ttk.Button(panel, text=label, command=command)
+            button.grid(row=4, column=column, sticky='ew', padx=2, pady=3)
+            self.demo_buttons[key] = button
+        ttk.Label(panel, textvariable=self.demo_status, wraplength=480, justify='left').grid(
+            row=5, column=0, columnspan=3, sticky='w', pady=4)
+        self._refresh_demo_controls()
+        return row + 1
+
+    def _refresh_demo_controls(self):
+        active = self.demo.active
+        self.demo_buttons['start'].configure(state='normal' if (
+            not active and not self.coordinator.emergency
+            and self.demo_config_valid and self.demo_ready.get()) else 'disabled')
+        self.demo_buttons['pause'].configure(
+            text='시연 일시정지' if self.coordinator.enabled else '시연 재개',
+            state='normal' if active and not self.coordinator.emergency else 'disabled')
+        self.demo_buttons['cancel'].configure(state='normal' if active else 'disabled')
+        prefix = '일시정지 · ' if active and not self.coordinator.enabled else ''
+        detail = f'{prefix}{self.demo.stage} · {self.demo.detail}'
+        self.demo_status.set(detail + ('\n' + self.demo_error if self.demo_error else ''))
 
     def _load_route_fields(self, _event=None):
         route = self.routes.get(self.lane_direction.get(), {})
@@ -173,7 +287,8 @@ class MultiBotControlUI:
             self.goal_status.set('지도를 수신한 뒤 지도 선택을 눌러주세요.')
             return
         self.map_capture = (kind, target)
-        label = POSE_LABELS[target] if kind == 'route' else f'{target} 초기 위치'
+        label = (DEMO_LABELS[target] if kind == 'demo' else
+                 POSE_LABELS[target] if kind == 'route' else f'{target} 초기 위치')
         self.capture_cancel_button.configure(state='normal')
         self.goal_status.set(f'{label} 입력: 위치를 누르고 방향으로 드래그하세요. Esc로 취소')
 
@@ -239,52 +354,43 @@ class MultiBotControlUI:
 
     def _pause_selected_mission(self):
         robot = self.selected_robot.get()
+        if self._demo_owns(robot):
+            self.goal_status.set('통합 시연 영역의 시연 일시정지/재개를 사용하세요.')
+            return
         request = self.coordinator.requests.get(robot)
-        if request is None:
+        if request is None or self.coordinator.emergency:
             self.goal_status.set('진행 중인 임무를 선택하세요.')
             return
         _, detail = self.coordinator.pause_robot(robot, not request.paused)
         self.goal_status.set(detail)
 
     def _build_lane_panel(self, controls, row):
-        panel = ttk.LabelFrame(controls, text='차선 / Nav2 연속 임무', padding=8)
+        panel = ttk.LabelFrame(controls, text='선택 로봇 임무 / 차선 시험', padding=8)
         panel.grid(row=row, column=0, columnspan=2, sticky='ew', pady=8)
         panel.columnconfigure(0, weight=1)
+        panel.columnconfigure(1, weight=1)
         picker = ttk.Combobox(panel, textvariable=self.lane_direction,
                               values=DIRECTIONS, state='readonly', width=12)
         picker.grid(row=0, column=0, sticky='w')
-        picker.bind('<<ComboboxSelected>>', self._load_route_fields)
-        ttk.Label(panel, text='양방향 모두 전진 주행').grid(row=0, column=1, sticky='w')
-        table = ttk.Frame(panel)
-        table.grid(row=1, column=0, columnspan=2, sticky='ew', pady=4)
-        for column, label in enumerate(('좌표', 'x (m)', 'y (m)', '방향 (°)')):
-            ttk.Label(table, text=label).grid(row=0, column=column, padx=2)
-        for index, (field, label) in enumerate(zip(POSES, ('입구', '출구', '다음 목표')), 1):
-            ttk.Label(table, text=label).grid(row=index, column=0, sticky='w')
-            for column, variable in enumerate(self.route_values[field], 1):
-                ttk.Entry(table, textvariable=variable, width=7).grid(row=index, column=column, padx=1)
-            ttk.Button(table, text='지도 선택', width=0,
-                       command=lambda f=field: self._capture_route_pose(f)).grid(row=index, column=4, padx=3)
-            ttk.Button(table, text='지정', width=0,
-                       command=lambda f=field: self._apply_route_pose(f)).grid(row=index, column=5, padx=3)
-        ttk.Button(panel, text='방향별 경로 저장', command=self._save_route).grid(row=2, column=0, columnspan=2, sticky='ew', pady=4)
-        ttk.Label(panel, textvariable=self.route_status, wraplength=360).grid(row=3, column=0, columnspan=2, sticky='w')
-        ttk.Checkbutton(panel, text='현장 감시·즉시 정지 준비 확인', variable=self.field_ready).grid(row=4, column=0, columnspan=2, sticky='w', pady=6)
+        picker.bind('<<ComboboxSelected>>', self._cancel_map_capture)
+        ttk.Label(panel, text='차선 단독 테스트 방향').grid(row=0, column=1, sticky='w')
+        ttk.Checkbutton(panel, text='현장 감시·즉시 정지 준비 확인', variable=self.field_ready).grid(row=1, column=0, columnspan=2, sticky='w', pady=6)
         for key, label, handler, grid_row, column in (
-                ('continuous', '연속 임무 시작', self._start_continuous, 5, 0),
-                ('test', '차선 단독 테스트', self._start_lane_test, 5, 1),
-                ('finish', '차선 구간 완료', self._publish_lane_finish, 6, 0),
-                ('pause', '일시정지 / 재개', self._pause_selected_mission, 6, 1),
-                ('cancel', '선택 임무 중단', self._cancel_selected_goal, 7, 0),
-                ('test_all', '전체 로봇 차선 테스트', self._start_lane_test_all, 7, 1)):
+                ('test', '선택 로봇 차선 시험 시작', self._start_lane_test, 2, 0),
+                ('test_all', '전체 차선 시험 시작', self._start_lane_test_all, 2, 1),
+                ('finish', '선택 로봇 차선 완료', self._publish_lane_finish, 3, 0),
+                ('pause', '선택 임무 일시정지', self._pause_selected_mission, 3, 1),
+                ('cancel', '선택 임무 취소', self._cancel_selected_goal, 4, 0)):
             button = ttk.Button(panel, text=label, command=handler)
             button.grid(row=grid_row, column=column, sticky='ew', padx=2, pady=3)
             self.lane_buttons[key] = button
-        ttk.Label(panel, textvariable=self.lane_status, wraplength=360, justify='left').grid(row=8, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Label(panel, textvariable=self.lane_status, wraplength=360, justify='left').grid(row=5, column=0, columnspan=2, sticky='w', pady=4)
         return row + 1
 
     def _lane_start_available(self, robot):
         """Return whether one robot can accept a new lane mission now."""
+        if self._demo_owns(robot):
+            return False
         data = self.lane_navigation.telemetry(robot) if robot else {}
         return bool(robot and data.get('fresh', False) and not data.get('active')
                     and self.coordinator.requests.get(robot) is None
@@ -297,15 +403,21 @@ class MultiBotControlUI:
         request = self.coordinator.requests.get(robot)
         fresh = data.get('fresh', False)
         available = self._lane_start_available(robot)
-        for key in ('continuous', 'test'):
-            self.lane_buttons[key].configure(state='normal' if available and self.field_ready.get() else 'disabled')
+        self.lane_buttons['test'].configure(
+            state='normal' if available and self.field_ready.get() else 'disabled')
         all_available = all(self._lane_start_available(item.name) for item in ROBOTS)
         self.lane_buttons['test_all'].configure(
             state='normal' if all_available and self.field_ready.get() else 'disabled')
         active_lane = request is not None and request.phase in {'LANE_ACTIVE', 'SAFETY_HOLD'}
-        self.lane_buttons['finish'].configure(state='normal' if fresh and active_lane else 'disabled')
-        for key in ('pause', 'cancel'):
-            self.lane_buttons[key].configure(state='normal' if request is not None else 'disabled')
+        self.lane_buttons['finish'].configure(state='normal' if fresh and active_lane and not self.coordinator.emergency else 'disabled')
+        managed = self._demo_owns(robot)
+        self.lane_buttons['pause'].configure(
+            text='선택 임무 재개' if request is not None and request.paused else '선택 임무 일시정지',
+            state='normal' if request is not None and not managed and not self.coordinator.emergency
+            and request.phase not in {'LANE_FAILED', 'LANE_STOPPING', 'E_STOP_HOLD'} else 'disabled')
+        self.lane_buttons['cancel'].configure(
+            text='통합 시연 중단 (두 대)' if managed else '선택 임무 취소',
+            state='normal' if robot and (request is not None or managed or robot == self.coordinator.manual_robot) else 'disabled')
         if not robot:
             self.lane_status.set('로봇을 선택하세요.')
         elif not fresh:
@@ -445,6 +557,7 @@ class MultiBotControlUI:
         self.root.bind('<Escape>', self._cancel_map_capture)
 
         next_row = self._build_robot_selection_panel(controls)
+        next_row = self._build_demo_controls(controls, next_row)
         next_row = self._build_lane_panel(controls, next_row)
         next_row = self._build_initial_pose_panel(controls, next_row)
         next_row = self._build_navigation_panel(controls, next_row)
@@ -504,7 +617,7 @@ class MultiBotControlUI:
         """Build command-target buttons and return the next grid row."""
         ttk.Label(
             controls,
-            text='관제 PC의 /cmd_vel을\n전달할 로봇을 선택하세요.',
+            text='작업할 로봇 선택 → 임무 또는 수동 조작 선택',
             justify='left',
         ).grid(row=0, column=0, sticky='w', pady=(0, 12))
 
@@ -541,7 +654,7 @@ class MultiBotControlUI:
 
         emergency_button = tk.Button(
             controls,
-            text='전체 정지 / 선택 해제',
+            text='전체 비상정지',
             command=self._emergency_stop,
             bg='#c62828',
             fg='white',
@@ -590,7 +703,7 @@ class MultiBotControlUI:
         """Build editable AMCL initial-pose controls."""
         initial_pose_panel = ttk.LabelFrame(
             controls,
-            text='AMCL 초기 위치 / 차선 출구 pose',
+            text='로봇 초기 위치 (AMCL)',
             padding=8,
         )
         initial_pose_panel.grid(
@@ -636,12 +749,14 @@ class MultiBotControlUI:
                 width=0,
                 command=lambda name=robot.name: self._capture_initial_pose(name),
             ).grid(row=item_row, column=4, padx=3, pady=3)
-            ttk.Button(
+            apply_button = ttk.Button(
                 initial_pose_panel,
-                text='설정',
+                text='초기 위치 적용',
                 width=0,
                 command=lambda name=robot.name: self._set_initial_pose(name),
-            ).grid(row=item_row, column=5, padx=3, pady=3)
+            )
+            apply_button.grid(row=item_row, column=5, padx=3, pady=3)
+            self.initial_pose_buttons[robot.name] = apply_button
 
         ttk.Label(
             initial_pose_panel,
@@ -666,7 +781,7 @@ class MultiBotControlUI:
         """Build per-robot Nav2 status and cancellation controls."""
         navigation_panel = ttk.LabelFrame(
             controls,
-            text='Nav2 주행',
+            text='로봇 주행 상태 / 수동 조작',
             padding=8,
         )
         navigation_panel.grid(
@@ -694,20 +809,11 @@ class MultiBotControlUI:
                 wraplength=360,
                 justify='left',
             ).grid(row=item_row, column=1, sticky='w', pady=2)
-        ttk.Button(
-            navigation_panel,
-            text='선택 로봇 목표 취소',
-            command=self._cancel_selected_goal,
-        ).grid(
-            row=len(ROBOTS),
-            column=0,
-            columnspan=2,
-            sticky='ew',
-            pady=(8, 0),
-        )
-        ttk.Button(navigation_panel, text='선택 로봇 수동 / 자율 전환',
-                   command=self._toggle_manual).grid(row=len(ROBOTS)+1, column=0,
-                                                    columnspan=2, sticky='ew', pady=6)
+        self.manual_button = ttk.Button(navigation_panel, text='선택 로봇 수동 조작',
+                                        command=self._toggle_manual)
+        self.manual_button.grid(row=len(ROBOTS), column=0, columnspan=2, sticky='ew', pady=6)
+        ttk.Label(navigation_panel, text='수동 전환 시 관제 RUN · 종료 시 자율주행 복귀',
+                  wraplength=480).grid(row=len(ROBOTS)+1, column=0, columnspan=2, sticky='w')
 
         return row + 1
 
@@ -729,26 +835,20 @@ class MultiBotControlUI:
             sticky='ew',
             pady=(14, 0),
         )
-        ttk.Button(
-            fleet_panel,
-            text='관제 시작 / 상태 재확인',
-            command=self._start_fleet,
-        ).grid(row=0, column=0, sticky='ew', padx=(0, 4))
-        ttk.Button(
-            fleet_panel,
-            text='관제 일시정지',
-            command=self._pause_fleet,
-        ).grid(row=0, column=1, sticky='ew', padx=(4, 0))
-        ttk.Button(
-            fleet_panel,
-            text='맵에서 병목 사각형 지정',
-            command=self._begin_zone_edit,
-        ).grid(row=1, column=0, sticky='ew', padx=(0, 4), pady=(6, 0))
-        ttk.Button(
-            fleet_panel,
-            text='병목 구역 삭제',
-            command=self._clear_zones,
-        ).grid(row=1, column=1, sticky='ew', padx=(4, 0), pady=(6, 0))
+        fleet_panel.columnconfigure(0, weight=1)
+        fleet_panel.columnconfigure(1, weight=1)
+        for key, label, handler, grid_row, column in (
+                ('start', '관제 시작 (RUN)', self._start_fleet, 0, 0),
+                ('pause', '전체 일시정지 (HOLD)', self._pause_fleet, 0, 1),
+                ('zone', '병목 구역 지정 / 교체', self._begin_zone_edit, 1, 0),
+                ('clear', '병목 구역 삭제', self._clear_zones, 1, 1)):
+            button = ttk.Button(fleet_panel, text=label, command=handler)
+            button.grid(row=grid_row, column=column, sticky='ew', padx=2, pady=3)
+            self.fleet_buttons[key] = button
+        ttk.Label(fleet_panel, text='RUN은 주행 허가 · HOLD는 목표를 유지하고 전체 정지',
+                  wraplength=480).grid(row=4, column=0, columnspan=2, sticky='w', pady=3)
+        ttk.Label(fleet_panel, text='구역 편집은 관제 정지 중 · 구역 삭제 시 병목 제한 해제',
+                  wraplength=480).grid(row=5, column=0, columnspan=2, sticky='w')
         ttk.Label(
             fleet_panel,
             textvariable=self.fleet_status,
@@ -779,7 +879,7 @@ class MultiBotControlUI:
         hint.grid(row=0, column=0, sticky='ew')
         hint.bind('<Configure>', lambda event: hint.configure(wraplength=max(100, event.width)))
         self.capture_cancel_button = ttk.Button(
-            toolbar, text='선택 취소 (Esc)', width=0, state='disabled',
+            toolbar, text='좌표 선택 취소 (Esc)', width=0, state='disabled',
             command=self._cancel_map_capture,
         )
         self.capture_cancel_button.grid(row=0, column=1, padx=(6, 0))
@@ -820,7 +920,12 @@ class MultiBotControlUI:
             self.routing_status.set('먼저 로봇을 선택하세요.')
             return
         allowed, detail = self.coordinator.toggle_manual(robot_name)
-        self.routing_status.set(detail if allowed else f'전환 실패 · {detail}')
+        if allowed and self.coordinator.manual_robot == robot_name:
+            # Autonomous starts clear the node's routing target, not the UI selection.
+            self.node.select_robot(robot_name)
+        message = detail if allowed else f'전환 실패 · {detail}'
+        self.routing_status.set(message)
+        self.goal_status.set(message)
 
     def _publish_lane_finish(self) -> None:
         robot = self.selected_robot.get()
@@ -838,6 +943,9 @@ class MultiBotControlUI:
         robot = self.selected_robot.get()
         if not robot or not self.field_ready.get():
             self.goal_status.set('로봇 선택과 현장 준비 확인이 필요합니다.')
+            return
+        if not self._lane_start_available(robot):
+            self.goal_status.set('시작 실패 · 차선 연결 상태와 진행 중인 임무를 확인하세요.')
             return
         allowed, detail = self.coordinator.submit_lane_test(robot, self.lane_direction.get())
         self.goal_status.set(detail if allowed else f'시작 실패 · {detail}')
@@ -884,12 +992,17 @@ class MultiBotControlUI:
         self.node.stop_all()
         self.node.clear_selection()
         self.selected_robot.set('')
-        self.routing_status.set(
-            '로봇 정지 / Nav2 목표 일시 취소 - 저장 목표는 재시작 시 복구됩니다.',
-        )
+        self.field_ready.set(False)
+        self.demo_ready.set(False)
+        message = '전체 비상정지 · 차선/시연은 새로 시작 · 개별 Nav2 목표는 유지됨'
+        self.routing_status.set(message)
+        self.goal_status.set(message)
         self._update_button_styles()
 
     def _set_initial_pose(self, robot_name: str) -> None:
+        if not self._initial_pose_available(robot_name):
+            self.initial_pose_status.set('임무를 중단하고 수동 조작을 해제한 뒤 초기 위치를 적용하세요.')
+            return
         values = self.initial_pose_values[robot_name]
         try:
             x = float(values['x'].get())
@@ -911,10 +1024,14 @@ class MultiBotControlUI:
         if not robot_name:
             self.goal_status.set('목표를 취소할 로봇을 먼저 선택하세요.')
             return
+        managed = self._demo_owns(robot_name)
         self.coordinator.cancel_robot(robot_name)
-        self.goal_status.set(f'{robot_name} 목표 취소를 요청했습니다.')
+        self.goal_status.set('통합 시연 중단 · 두 로봇 STOP/HOLD' if managed
+                             else f'{robot_name} 임무 취소 · STOP 요청')
 
     def _start_fleet(self) -> None:
+        if self.coordinator.enabled and not self.coordinator.emergency:
+            return
         success, detail = self.coordinator.start()
         self.fleet_status.set(detail)
         if not success:
@@ -997,7 +1114,7 @@ class MultiBotControlUI:
             return
         start_x, start_y, _, _ = self.goal_drag_start
         kind, name = self.goal_drag_target
-        color = '#fbbf24' if kind == 'route' else ROBOT_BY_NAME[name].color
+        color = '#fbbf24' if kind in {'route', 'demo'} else ROBOT_BY_NAME[name].color
         self.canvas.delete('goal_preview')
         self.canvas.create_oval(
             start_x - 5,
@@ -1060,13 +1177,18 @@ class MultiBotControlUI:
         )
         yaw_degrees = (yaw_degrees + 180.0) % 360.0 - 180.0
         kind, name = target
+        if kind == 'demo':
+            if self.demo_panel is not None and self.demo_panel.window.winfo_exists():
+                self.demo_panel.capture(name, (world_x, world_y, yaw_degrees))
+                self.goal_status.set('시연 좌표 입력됨 · 설정 창에서 좌표 반영/대기점 추가를 누르세요.')
+            return
         if kind in {'route', 'initial'}:
             if kind == 'route':
                 variables = self.route_values[name]
                 label, action = POSE_LABELS[name], '지정'
             else:
                 variables = [self.initial_pose_values[name][key] for key in ('x', 'y', 'yaw')]
-                label, action = f'{name} 초기 위치', '설정'
+                label, action = f'{name} 초기 위치', '초기 위치 적용'
             for variable, value in zip(variables, (world_x, world_y, yaw_degrees)):
                 variable.set(f'{value:.3f}')
             # Keep capture armed for adjustments until explicit apply or cancel.
@@ -1117,6 +1239,37 @@ class MultiBotControlUI:
             message.info.resolution,
         )
 
+    def _demo_owns(self, robot):
+        demo = getattr(self, 'demo', None)
+        return bool(demo is not None and demo.owns(robot))
+
+    def _initial_pose_available(self, robot):
+        return (robot not in self.coordinator.requests
+                and self.coordinator.manual_robot != robot
+                and not self._demo_owns(robot))
+
+    def _refresh_action_buttons(self):
+        robot = self.selected_robot.get()
+        manual = bool(robot and self.coordinator.manual_robot == robot)
+        available = bool(robot and not self.coordinator.emergency
+                         and not self._demo_owns(robot)
+                         and (manual or (self.node.heartbeat_is_fresh(robot)
+                              and (not self.coordinator.zones or self.node.pose_is_fresh(robot)))))
+        self.manual_button.configure(
+            text='선택 로봇 자율주행 복귀' if manual else '선택 로봇 수동 조작',
+            state='normal' if available else 'disabled')
+        for name, button in self.initial_pose_buttons.items():
+            button.configure(state='normal' if self._initial_pose_available(name) else 'disabled')
+        self.fleet_buttons['start'].configure(
+            text='비상정지 해제 · 관제 RUN' if self.coordinator.emergency else '관제 시작 / 재개 (RUN)',
+            state='disabled' if self.coordinator.enabled and not self.coordinator.emergency else 'normal')
+        self.fleet_buttons['pause'].configure(
+            state='normal' if self.coordinator.enabled and not self.coordinator.emergency else 'disabled')
+        self.fleet_buttons['zone'].configure(
+            state='normal' if not self.coordinator.enabled and self.node.latest_map is not None else 'disabled')
+        self.fleet_buttons['clear'].configure(
+            state='normal' if not self.coordinator.enabled and self.coordinator.zones else 'disabled')
+
     def _update_button_styles(self) -> None:
         selected = self.selected_robot.get()
         for robot in ROBOTS:
@@ -1160,7 +1313,11 @@ class MultiBotControlUI:
             return
 
         self.coordinator.tick()
+        if self.demo_panel is not None and self.demo_panel.window.winfo_exists():
+            self.demo_panel.refresh()
+        self._refresh_demo_controls()
         self._refresh_lane_panel()
+        self._refresh_action_buttons()
         if self.node.map_generation != self.rendered_map_generation:
             self._render_map()
         self._draw_robot_markers()
@@ -1434,16 +1591,22 @@ class MultiBotControlUI:
     def _refresh_fleet_status(self) -> None:
         self.fleet_status.set(self.coordinator.summary)
         selected = self.selected_robot.get()
-        if selected and self.coordinator.manual_robot == selected:
-            if selected in self.coordinator.blocked_robots:
+        if self.coordinator.emergency:
+            self.routing_status.set('전체 비상정지 · 관제 RUN 버튼으로 명시적으로 해제')
+        elif selected and self.coordinator.manual_robot == selected:
+            if not self.coordinator.enabled or self.node.gate_modes[selected] != FleetPermit.MODE_RUN:
                 self.routing_status.set(
                     f'{selected} 수동 명령 HOLD · '
                     f'{self.coordinator.robot_details[selected]}',
                 )
             else:
                 self.routing_status.set(
-                    f'/cmd_vel -> /{selected}/cmd_vel_manual_candidate · RUN',
+                    f'{selected} 수동 조작 허가 · RUN',
                 )
+        elif selected:
+            self.routing_status.set(f'{selected} 선택됨 · {self.coordinator.robot_details[selected]}')
+        else:
+            self.routing_status.set('작업할 로봇을 선택하세요.')
         details = []
         for robot in ROBOTS:
             age = self.node.heartbeat_age(robot.name)
