@@ -14,7 +14,7 @@
 - 시연 시작의 위치 분산 허용값은 x/y 각각 0.30m², 차선 자동 종료는 `lane_exit_position_variance`의 기본 0.0025m²(표준편차 5cm)로 구분한다. 종료 반경 0.20m·유지 시간 0.5초와 기존 yaw 상한은 유지한다.
 
 인터페이스 정의, 속도·watchdog·센서 임계값, Nav2 progress checker는 변경하지 않았다.
-횡단보도 정지 기능을 활성화하는 운용 설정 변경은 포함하지 않았다.
+초기 임무 복구 수정에는 횡단보도 정지 활성화를 포함하지 않았다. 후속 설정 변경으로 로봇 저장소의 기본 `lane_control.json`과 `lane_control_lane_only.json`은 `behavior.crosswalk_stop=true`를 사용한다. 최대 0.06m/s 접근 → 정지 명령 → odom 정지 확인 → 안전 조건이 유지된 2초 WAIT → 최대 0.06m/s 재출발 순서다. 기체 홈의 실제 운용 JSON과 설치 코드 업데이트, 현장 정지·재출발 검증은 별도로 확인해야 한다.
 
 ## 검증 범위
 
