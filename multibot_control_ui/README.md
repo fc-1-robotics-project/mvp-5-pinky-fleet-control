@@ -1,6 +1,6 @@
 # multibot_control_ui
 
-ROS 2 Jazzy의 Nav2·차선 임무·병목 관제 UI. 현재 작업 브랜치는 **`codex/two-robot-demo-20261005`**입니다.
+ROS 2 Jazzy의 Nav2·차선 임무·병목 관제 UI. 현재 작업 브랜치는 **`feature/mission-recovery-position-20261009`**입니다.
 
 ## 설치와 실행
 
@@ -57,7 +57,7 @@ robot1=21, robot2=19, 관제=22. 로봇별 `/navigate_to_pose`와 `/follow_lane`
 
 통합 시연 설정은 `~/.config/pinky_fleet_control/two_robot_demo.json`에 저장됩니다. 기존 3개 좌표 연속 임무 입력은 UI에서 제거했습니다. 예전 `lane_routes.json` 파일은 보존합니다. 병목 영구 설정은 `config/bottleneck_zones.yaml`; UI에서 지정한 사각형은 현재 실행에만 유지됩니다.
 
-현재 저장소 차선 설정은 cruise/max/fallback 0.09m/s, blind/approach 0.06m/s·횡단보도 감속 통과·라이다 물체 정지 ON입니다. 기체의 실제 운용 JSON은 별도로 확인합니다. 자세한 설정과 검증 범위는 공통 실행 가이드에 있습니다.
+현재 저장소의 기본 차선 설정은 cruise/max/fallback 0.09m/s, blind/approach 0.06m/s·횡단보도 정지 ON·라이다 물체 정지 ON입니다. 횡단보도는 정지 명령과 odom 정지 확인 후 안전 조건이 유지되면 2초 WAIT 뒤 최대 0.06m/s로 재출발합니다. 기체의 실제 운용 JSON에서 `behavior.crosswalk_stop=true`와 `wait_s=2.0`, 업데이트된 설치 코드 사용 여부를 각각 확인합니다. 자세한 설정과 기체별 실행 경로·검증 범위는 공통 실행 가이드에 있습니다.
 
 ## 개발
 

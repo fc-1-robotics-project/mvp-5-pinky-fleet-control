@@ -1,8 +1,8 @@
 # 새 관제 PC 설치·기존 PC 업데이트
 
-**두 저장소에서 `codex/two-robot-demo-20261005` 브랜치를 함께 사용합니다.**
+**두 저장소에서 `feature/mission-recovery-position-20261009` 브랜치를 함께 사용합니다.**
 
-[로봇 설치 가이드](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md) → 이 문서 → [실행·UI 사용법](UI_INTEGRATION.md) 순서입니다. 기준일: 2026-10-06.
+[로봇 설치 가이드](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/blob/feature/mission-recovery-position-20261009/TEAM_LANE_GUIDE.md) → 이 문서 → [실행·UI 사용법](UI_INTEGRATION.md) 순서입니다. 기준일: 2026-10-09.
 
 ## 1. 준비
 
@@ -12,9 +12,11 @@
 | 로봇 | 같은 공유 브랜치의 통합 스택과 기체별 보정·지도·모델 설치 |
 | 기본 domain | robot1=21, robot2=19, 관제=22 |
 | 포함 패키지 | `pinky_interfaces`, `vision_control`, `multibot_control_ui` |
-| 현재 차선 프로필 | **cruise/max/fallback 0.09m/s, blind/approach 0.06m/s / YOLO 448 / 횡단보도 감속 / 라이다 정지 ON** |
+| 현재 기본 차선 프로필 | **cruise/max/fallback 0.09m/s, blind/approach 0.06m/s / YOLO 448 / 횡단보도 정지·odom 확인·2초 WAIT·재출발 / 라이다 정지 ON** |
 
 ROS 미설치 PC는 [ROS Jazzy 공식 Ubuntu 설치 안내](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)에 따라 먼저 설치합니다. PC에서는 `ros-jazzy-desktop`을 사용할 수 있습니다. 이 PC에는 차선 추론용 torch/YOLO·카메라 드라이버·모델이 필요하지 않습니다. 차선 인식은 로봇에서 수행합니다.
+
+횡단보도 접근·재출발 속도 상한 0.06m/s는 유지합니다. 로봇의 기본 JSON 두 종류는 `behavior.crosswalk_stop=true`, `wait_s=2.0`입니다. 실제로 source하는 설치 코드와 해당 기체 홈의 운용 JSON도 업데이트되었는지 확인해야 합니다. Git 갱신은 홈 JSON을 바꾸지 않습니다. 확인된 두 기체의 스크립트·domain·IP와 설정 경로는 [공통 실행 가이드](UI_INTEGRATION.md#7-최신-시험-환경의-경로-예시)에 있습니다.
 
 로봇과 PC는 서로 DDS 통신 가능한 네트워크에 연결합니다. 관제는 bridge뿐 아니라 로봇 domain에 직접 참여하는 액션 클라이언트도 사용합니다. SSH 연결 성공만으로 ROS 통신까지 확인된 것은 아닙니다. `timedatectl status`로 시간 동기화를 확인하고, [DDS 발견 범위](https://docs.ros.org/en/jazzy/Tutorials/Advanced/Improved-Dynamic-Discovery.html)를 SUBNET으로 맞춥니다. 무선 AP의 클라이언트 격리/멀티캐스트 차단이나 방화벽 설정도 확인합니다.
 
@@ -28,7 +30,7 @@ sudo apt install git python3-colcon-common-extensions python3-rosdep \
   python3-tk python3-pytest ros-jazzy-domain-bridge
 source /opt/ros/jazzy/setup.bash
 mkdir -p ~/colcon_ws/src
-git clone --branch codex/two-robot-demo-20261005 \
+git clone --branch feature/mission-recovery-position-20261009 \
   https://github.com/fc-1-robotics-project/mvp-5-pinky-fleet-control.git \
   ~/colcon_ws/src/pinky-fleet-control
 # rosdep 초기화가 안 된 PC에서만: sudo rosdep init
@@ -97,8 +99,8 @@ UI와 브리지를 종료한 상태에서 실행합니다. 작업 중인 수정�
 cd ~/colcon_ws/src/pinky-fleet-control
 git status --short
 git fetch origin
-git switch codex/two-robot-demo-20261005
-git pull --ff-only origin codex/two-robot-demo-20261005
+git switch feature/mission-recovery-position-20261009
+git pull --ff-only origin feature/mission-recovery-position-20261009
 source /opt/ros/jazzy/setup.bash
 cd ~/colcon_ws
 colcon build --symlink-install --packages-up-to multibot_control_ui

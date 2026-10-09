@@ -177,7 +177,7 @@ def test_later_robot_holds_only_when_it_reaches_occupied_boundary() -> None:
     assert 'OWNED_BY_robot1' in node.modes['robot2'][3]
 
 
-def test_waiting_robot_resumes_existing_goal_after_owner_clears() -> None:
+def test_waiting_robot_reissues_cancelled_goal_once_after_owner_clears() -> None:
     coordinator, node, navigation = make_coordinator()
     coordinator.submit_goal('robot2', -1.0, 0.25, 180.0)
     node.positions['robot1'] = (0.5, 0.25)
@@ -191,7 +191,8 @@ def test_waiting_robot_resumes_existing_goal_after_owner_clears() -> None:
     assert coordinator.zone_list()[0].state == 'FREE'
     assert node.modes['robot2'][0] == FleetPermit.MODE_RUN
     assert coordinator.requests['robot2'].phase == 'ACTIVE'
-    assert navigation.sent.count(('robot2', -1.0, 0.25, 180.0)) == 1
+    assert navigation.sent.count(('robot2', -1.0, 0.25, 180.0)) == 2
+    assert navigation.cancelled == ['robot2']
 
 
 def test_aborted_goal_is_reissued_when_boundary_hold_is_released() -> None:
@@ -241,7 +242,7 @@ def test_estop_retains_goal_and_reissues_it_on_restart() -> None:
     assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
 
 
-def test_estop_restart_reissues_goal_even_if_robot_remains_held() -> None:
+def test_estop_restart_retains_goal_until_robot_boundary_hold_clears() -> None:
     coordinator, node, navigation = make_coordinator()
     goal = ('robot2', -1.0, 0.25, 180.0)
     coordinator.submit_goal(*goal)
@@ -253,7 +254,7 @@ def test_estop_restart_reissues_goal_even_if_robot_remains_held() -> None:
     success, _ = coordinator.start()
 
     assert success
-    assert navigation.sent.count(goal) == 2
+    assert navigation.sent.count(goal) == 1
     assert coordinator.requests['robot2'].phase == 'BOUNDARY_HOLD'
     assert node.modes['robot2'][0] == FleetPermit.MODE_HOLD
 
@@ -311,18 +312,24 @@ def test_manual_selection_enables_control_and_run_gate() -> None:
     assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
 
 
-def test_manual_toggle_preserves_active_navigation_goal() -> None:
+def test_manual_toggle_preserves_retained_navigation_goal_and_restarts_once() -> None:
     coordinator, node, navigation = make_coordinator()
     coordinator.submit_goal('robot1', 2.0, 0.25, 0.0)
+    original = coordinator.requests['robot1']
 
     assert coordinator.toggle_manual('robot1')[0]
     assert 'robot1' in coordinator.requests
-    assert navigation.cancelled == []
+    assert navigation.cancelled == ['robot1']
     assert node.manual_routing['robot1']
+    assert node.drive_modes['robot1'] == 'MANUAL'
+    assert len(navigation.sent) == 1
 
     assert coordinator.toggle_manual('robot1')[0]
     assert 'robot1' in coordinator.requests
+    assert coordinator.requests['robot1'] is original
     assert not node.manual_routing['robot1']
+    assert node.drive_modes['robot1'] == 'NAV2'
+    assert navigation.sent == [('robot1', 2., .25, 0.)] * 2
 
 
 def test_nav_arrival_runs_lane_then_reseeds_amcl_with_low_covariance() -> None:
@@ -428,7 +435,7 @@ def test_boundary_intrusion_holds_only_later_robot() -> None:
     assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
     assert node.modes['robot2'][0] == FleetPermit.MODE_HOLD
     assert navigation.states['robot1'] == 'ACTIVE'
-    assert navigation.states['robot2'] == 'ACTIVE'
+    assert navigation.states['robot2'] == 'CANCELED'
 
 
 def test_owner_transfers_to_waiting_intruder_after_first_robot_clears() -> None:

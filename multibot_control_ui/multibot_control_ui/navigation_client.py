@@ -47,6 +47,7 @@ class RobotNavigationClient:
         self._status = 'Nav2 검색 중'
         self._state = 'SEARCHING'
         self._goal_handle = None
+        self._cancel_requested = False
         self._last_goal: Optional[Tuple[float, float, float]] = None
 
         # A generation token prevents callbacks from a superseded goal from
@@ -56,6 +57,9 @@ class RobotNavigationClient:
 
     def send_goal(self, x: float, y: float, yaw_degrees: float) -> bool:
         """Send a map-frame goal without blocking the Tkinter event loop."""
+        with self.lock:
+            if self._state in {'PENDING', 'ACTIVE', 'CANCELLING'} or self._goal_handle is not None:
+                return False  # A cancel acknowledgement is not a terminal result.
         if not all(math.isfinite(value) for value in (x, y, yaw_degrees)):
             self._set_status('잘못된 목표 좌표')
             self._set_state('ERROR')
@@ -75,18 +79,22 @@ class RobotNavigationClient:
         goal.pose.pose.orientation.w = orientation_w
 
         with self.lock:
+            if self._state in {'PENDING', 'ACTIVE', 'CANCELLING'} or self._goal_handle is not None:
+                return False
             self._goal_generation += 1
             generation = self._goal_generation
             self._last_goal = (x, y, yaw_degrees)
             self._status = '목표 승인 대기 중'
             self._state = 'PENDING'
-        future = self.action_client.send_goal_async(
-            goal,
-            feedback_callback=lambda message: self._feedback_callback(
-                message,
-                generation,
-            ),
-        )
+            self._cancel_requested = False
+        try:
+            future = self.action_client.send_goal_async(
+                goal,
+                feedback_callback=lambda message: self._feedback_callback(message, generation),
+            )
+        except Exception as error:
+            self._set_result_if_current(generation, f'목표 전송 확인 실패: {error}', 'CANCELLING')
+            return False  # Unknown remote acceptance requires STOP confirmation.
         future.add_done_callback(
             lambda result: self._goal_response_callback(
                 result,
@@ -100,16 +108,29 @@ class RobotNavigationClient:
         with self.lock:
             goal_handle = self._goal_handle
             generation = self._goal_generation
-            if goal_handle is None:
-                self._status = '취소할 활성 목표 없음'
+            if self._cancel_requested:
+                return True
+            if goal_handle is None and self._state != 'PENDING':
                 return False
+            self._cancel_requested = True
             self._status = '목표 취소 요청 중'
             self._state = 'CANCELLING'
-        future = goal_handle.cancel_goal_async()
-        future.add_done_callback(
-            lambda result: self._cancel_done_callback(result, generation),
-        )
+        if goal_handle is None:
+            return True  # Cancel immediately when a pending acceptance arrives.
+        self._cancel_handle(goal_handle, generation)
         return True
+
+    def _cancel_handle(self, goal_handle, generation):
+        try:
+            future = goal_handle.cancel_goal_async()
+            future.add_done_callback(
+                lambda result: self._cancel_done_callback(result, generation),
+            )
+        except Exception as error:
+            with self.lock:
+                if generation == self._goal_generation and self._cancel_requested:
+                    self._status = f'취소 전송 실패: {error}'
+                    self._cancel_requested = False  # Permit another RPC; retain state and handle.
 
     def status(self) -> str:
         """Return a thread-safe navigation status for presentation."""
@@ -152,7 +173,7 @@ class RobotNavigationClient:
             self._set_result_if_current(
                 generation,
                 f'목표 전송 실패: {error}',
-                'ERROR',
+                'CANCELLING',
             )
             return
         if not goal_handle.accepted:
@@ -168,17 +189,26 @@ class RobotNavigationClient:
                 goal_handle.cancel_goal_async()
                 return
             self._goal_handle = goal_handle
-            self._status = '주행 중'
-            self._state = 'ACTIVE'
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(
-            lambda result: self._result_callback(result, generation),
-        )
+            cancel_requested = self._cancel_requested
+            self._status = '목표 취소 요청 중' if cancel_requested else '주행 중'
+            self._state = 'CANCELLING' if cancel_requested else 'ACTIVE'
+        try:
+            result_future = goal_handle.get_result_async()
+            result_future.add_done_callback(
+                lambda result: self._result_callback(result, generation),
+            )
+        except Exception as error:
+            self._set_result_if_current(generation, f'결과 요청 실패: {error}', 'CANCELLING')
+            cancel_requested = True
+            with self.lock:
+                self._cancel_requested = True
+        if cancel_requested:
+            self._cancel_handle(goal_handle, generation)
 
     def _feedback_callback(self, feedback_message, generation: int) -> None:
         remaining = feedback_message.feedback.distance_remaining
         with self.lock:
-            if generation == self._goal_generation:
+            if generation == self._goal_generation and not self._cancel_requested:
                 self._status = f'주행 중 · 남은 거리 {remaining:.2f} m'
 
     def _result_callback(self, future, generation: int) -> None:
@@ -190,7 +220,7 @@ class RobotNavigationClient:
             self._set_result_if_current(
                 generation,
                 f'결과 수신 실패: {error}',
-                'ERROR',
+                'CANCELLING',
             )
             return
 
@@ -213,6 +243,7 @@ class RobotNavigationClient:
             if generation != self._goal_generation:
                 return
             self._goal_handle = None
+            self._cancel_requested = False
             self._status = text
             self._state = state
 
@@ -220,15 +251,16 @@ class RobotNavigationClient:
         try:
             response = future.result()
             cancelled = bool(response.goals_canceling)
-            status = '목표 취소 처리 중' if cancelled else '목표 취소 거부됨'
-            state = 'CANCELLING' if cancelled else 'ERROR'
+            text = '목표 취소 처리 중' if cancelled else '목표 취소 거부됨'
         except Exception as error:  # ROS future exceptions are implementation-specific.
-            status, state = f'취소 실패: {error}', 'ERROR'
+            text = f'취소 실패: {error}'
+            cancelled = False
         with self.lock:
-            if (generation != self._goal_generation or self._goal_handle is None
-                    or self._state in {'SUCCEEDED', 'CANCELED', 'ABORTED', 'REJECTED'}):
+            if generation != self._goal_generation or not self._cancel_requested:
                 return
-            self._status, self._state = status, state
+            self._status = text  # Keep waiting for the old goal's terminal result.
+            if not cancelled:
+                self._cancel_requested = False  # Retain the handle but allow cancellation retry.
 
     def _set_status(self, text: str) -> None:
         with self.lock:

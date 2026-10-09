@@ -175,7 +175,8 @@ class RobotLaneClient:
         message = sample[1]
         stamp = message.header.stamp.sec + message.header.stamp.nanosec / 1e9
         age = self.node.get_clock().now().nanoseconds / 1e9 - stamp
-        if (not math.isfinite(age)
+        if (stamp <= 0 or not 0 <= message.header.stamp.nanosec < 1_000_000_000
+                or not math.isfinite(age)
                 or not -SOURCE_FUTURE_TOLERANCE_S <= age <= SOURCE_MAX_AGE_S):
             result['reason'] = (f'위치 원본 시각 불일치/지연 ({age:.2f}초 / '
                                 f'허용 -{SOURCE_FUTURE_TOLERANCE_S:.1f}~{SOURCE_MAX_AGE_S:.1f}초)')
@@ -222,7 +223,11 @@ class RobotLaneClient:
             return False
         msg = sample[1]
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
-        if msg.header.frame_id != 'map' or stamp <= epoch[1]:
+        source_age = self.node.get_clock().now().nanoseconds / 1e9 - stamp
+        if (msg.header.frame_id != 'map' or stamp <= max(0., epoch[1])
+                or not 0 <= msg.header.stamp.nanosec < 1_000_000_000
+                or not math.isfinite(source_age)
+                or not -SOURCE_FUTURE_TOLERANCE_S <= source_age <= SOURCE_MAX_AGE_S):
             return False
         pose = msg.pose.pose
         q = pose.orientation

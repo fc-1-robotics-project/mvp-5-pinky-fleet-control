@@ -64,11 +64,27 @@ def test_localization_requires_post_reset_sample_and_consistent_pose():
         pose=SimpleNamespace(covariance=covariance,pose=SimpleNamespace(position=SimpleNamespace(x=1.,y=2.),
              orientation=SimpleNamespace(x=0.,y=0.,z=0.,w=1.))))
     c._localization = (now, message)
+    c.node = SimpleNamespace(get_clock=lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=101_000_000_000)))
     assert c.localization_ready(now-.1, (1.,2.,0.))
     assert not c.localization_ready(now+.1, (1.,2.,0.))
     assert not c.localization_ready(now-.1, (3.,2.,0.))
     message.header.stamp.sec = 99
     assert not c.localization_ready(now-.1, (1.,2.,0.))
+
+
+def test_relocalization_rejects_stale_or_future_source_even_after_reset():
+    import time
+    c = pose_client(.0025)
+    now = time.monotonic()
+    message = c._fleet_localization[1]
+    c.node = SimpleNamespace(get_clock=lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=105_000_000_000)))
+    c._localization = (now, message)
+    c._localization_epoch = (now - .2, 100.)
+    for stamp in (101, 106):
+        message.header.stamp.sec = stamp
+        assert not c.localization_ready(now - .1, (1., 2., 0.))
 
 
 def test_cancel_late_completed_goal_does_not_deadlock():
@@ -244,3 +260,14 @@ def test_clock_tolerance_does_not_accept_invalid_status_timestamps(monkeypatch, 
     else:
         c._mission_status['status_time_s'] = stamp
     assert not c.telemetry()['fresh']
+
+
+@pytest.mark.parametrize('ahead,expected', [(50_000_000, True), (100_000_000, True), (110_000_000, False)])
+def test_reset_localization_keeps_source_clock_tolerance(ahead, expected, monkeypatch):
+    monkeypatch.setattr('vision_control.lane_client.time.monotonic', lambda: 102.)
+    c = pose_client(position_variance=.0025, yaw_variance=.0025)
+    message = c._fleet_localization[1]
+    message.header.stamp.nanosec = ahead
+    c._localization = (102., message)
+    c._localization_epoch = (100., 100.)
+    assert c.localization_ready(100., (1., 2., 0.)) is expected
