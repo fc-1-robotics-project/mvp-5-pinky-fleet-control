@@ -1,6 +1,7 @@
 from concurrent.futures import Future
 from threading import Lock
 from types import SimpleNamespace
+import pytest
 from vision_control.lane_client import RobotLaneClient
 
 
@@ -202,3 +203,44 @@ def test_relaxed_demo_limits_do_not_accept_stale_invalid_or_unknown_localization
         status = c.localization_status(**demo_limits())
         assert status['pose'] is None, fault
         assert status['reason'], fault
+
+
+def timed_pose_client(monkeypatch, source_age_ms, received_age_s=0.):
+    monkeypatch.setattr('vision_control.lane_client.time.monotonic', lambda: 1000.)
+    c = pose_client()
+    message = c._fleet_localization[1]
+    source_ns = 101_000_000_000 - source_age_ms * 1_000_000
+    message.header.stamp.sec, message.header.stamp.nanosec = divmod(source_ns, 1_000_000_000)
+    c._fleet_localization = (1000. - received_age_s, message)
+    c._mission_received = 1000. - received_age_s
+    c._mission_status = dict(status_time_s=source_ns / 1e9, exit_status=dict(version=1))
+    return c
+
+
+@pytest.mark.parametrize('source_age_ms, expected_fresh', [
+    (-15, True), (-60, True), (-100, True), (-101, False),
+    (1500, True), (1501, False),
+])
+def test_demo_pose_and_status_share_bounded_clock_tolerance(monkeypatch, source_age_ms, expected_fresh):
+    c = timed_pose_client(monkeypatch, source_age_ms)
+    assert (c.current_localization(**demo_limits()) is not None) is expected_fresh
+    assert c.telemetry()['fresh'] is expected_fresh
+
+
+@pytest.mark.parametrize('received_age_s, expected_fresh', [
+    (-.001, False), (1.5, True), (1.6, False),
+])
+def test_small_source_clock_lead_does_not_bypass_receive_age(monkeypatch, received_age_s, expected_fresh):
+    c = timed_pose_client(monkeypatch, -60, received_age_s)
+    assert (c.current_localization(**demo_limits()) is not None) is expected_fresh
+    assert c.telemetry()['fresh'] is expected_fresh
+
+
+@pytest.mark.parametrize('stamp', ['missing', None, float('nan'), float('inf'), float('-inf'), True, False])
+def test_clock_tolerance_does_not_accept_invalid_status_timestamps(monkeypatch, stamp):
+    c = timed_pose_client(monkeypatch, -60)
+    if stamp == 'missing':
+        c._mission_status.pop('status_time_s')
+    else:
+        c._mission_status['status_time_s'] = stamp
+    assert not c.telemetry()['fresh']
