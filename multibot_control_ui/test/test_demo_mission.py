@@ -243,7 +243,8 @@ def test_nav_failure_retains_stage_and_goal_until_rechecked(scene):
     f.tick()
     assert demo.active and demo.stage == 'NAV_ROUTES' and demo.recovering
     assert f.enabled
-    assert all(value[0] == FleetPermit.MODE_HOLD for value in node.modes.values())
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    assert node.modes['robot2'][0] == FleetPermit.MODE_RUN
 
 
 def test_map_and_robot_validation_and_atomic_save(tmp_path):
@@ -373,7 +374,8 @@ def test_nav_errors_retry_only_failed_goal_and_preserve_queues(scene, state):
     assert demo.tasks['A']['request'] is original
     assert fleet.requests['robot1'] is original
     assert demo.pending == pending
-    assert all(value[0] == FleetPermit.MODE_HOLD for value in node.modes.values())
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    assert node.modes['robot2'][0] == FleetPermit.MODE_RUN
     for _ in range(4):
         fleet.tick()
     assert nav.sent == sent
@@ -416,10 +418,10 @@ def test_recovery_health_must_be_continuous_and_operator_pause_prevents_retry(sc
     sent = list(nav.sent)
     clock[0] += 3.1
     fleet.tick()
-    node.heartbeat_fresh['robot2'] = False
+    node.heartbeat_fresh['robot1'] = False
     clock[0] += .8
     fleet.tick()
-    node.heartbeat_fresh['robot2'] = True
+    node.heartbeat_fresh['robot1'] = True
     fleet.tick()
     clock[0] += .8
     fleet.tick()

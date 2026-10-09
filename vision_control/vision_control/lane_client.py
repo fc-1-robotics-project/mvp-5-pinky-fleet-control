@@ -18,6 +18,11 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 
 
+# NTP-synchronized hosts can still differ by a few tens of milliseconds.
+SOURCE_FUTURE_TOLERANCE_S = .1
+SOURCE_MAX_AGE_S = 1.5
+
+
 class RobotLaneClient:
     """Run one FollowLane client directly in a robot's ROS domain."""
 
@@ -130,13 +135,14 @@ class RobotLaneClient:
         with self.lock:
             result = dict(self._mission_status)
             result['received_age_s'] = time.monotonic() - self._mission_received
-            result['fresh'] = result['received_age_s'] <= 1.5
+            result['fresh'] = 0 <= result['received_age_s'] <= SOURCE_MAX_AGE_S
             exit_status = result.get('exit_status')
             if isinstance(exit_status, dict) and exit_status.get('version') == 1:
                 stamp = result.get('status_time_s')
                 now = self.node.get_clock().now().nanoseconds / 1e9
                 age = now - stamp if type(stamp) in (int, float) else math.inf
-                result['fresh'] = result['fresh'] and math.isfinite(age) and 0 <= age <= 1.5
+                result['fresh'] = (result['fresh'] and math.isfinite(age)
+                                   and -SOURCE_FUTURE_TOLERANCE_S <= age <= SOURCE_MAX_AGE_S)
                 result['received_age_s'] = max(result['received_age_s'], age)
         return result
 
@@ -163,14 +169,16 @@ class RobotLaneClient:
         if sample is None:
             return result
         received_age = time.monotonic() - sample[0]
-        if not 0 <= received_age <= 1.5:
+        if not 0 <= received_age <= SOURCE_MAX_AGE_S:
             result['reason'] = f'위치 정보 수신 지연 ({received_age:.2f}초 / 최대 1.5초)'
             return result
         message = sample[1]
         stamp = message.header.stamp.sec + message.header.stamp.nanosec / 1e9
         age = self.node.get_clock().now().nanoseconds / 1e9 - stamp
-        if not math.isfinite(age) or not 0 <= age <= 1.5:
-            result['reason'] = f'위치 원본 시각 불일치/지연 ({age:.2f}초 / 최대 1.5초)'
+        if (not math.isfinite(age)
+                or not -SOURCE_FUTURE_TOLERANCE_S <= age <= SOURCE_MAX_AGE_S):
+            result['reason'] = (f'위치 원본 시각 불일치/지연 ({age:.2f}초 / '
+                                f'허용 -{SOURCE_FUTURE_TOLERANCE_S:.1f}~{SOURCE_MAX_AGE_S:.1f}초)')
             return result
         if message.header.frame_id != 'map':
             result['reason'] = f'위치 좌표계 확인 필요 ({message.header.frame_id} / map 필요)'

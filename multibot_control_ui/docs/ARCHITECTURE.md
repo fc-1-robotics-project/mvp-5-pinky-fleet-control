@@ -1,6 +1,6 @@
 # 관제 코드 구조
 
-기준일: **2026-10-06**, 작업 브랜치: `codex/two-robot-demo-20261005`, 병합 대상: 팀 `develop`.
+기준일: **2026-10-09**, 작업 브랜치: `feat/demo-independent-recovery`, 기준: `origin/develop`.
 설치·실행은 [팀 가이드](../../TEAM_LANE_GUIDE.md) / [UI 사용법](../../UI_INTEGRATION.md),
 시연 정책과 미해결 문제는 [통합 시연 가이드](TWO_ROBOT_DEMO.md)를 확인한다.
 
@@ -60,16 +60,21 @@ A_LANE (B 대기)
 
 ## 오류 처리와 현재 제한
 
-`wait_for_recovery`는 단계·목표·목록·병목 소유권을 보존한다.
-현재 구현은 `sequence.recovering` 동안 **두 로봇 모두 STOP/HOLD**로 만든다.
-두 로봇 상태가 1초 정상이고 마지막 시도에서 3초가 지났으면 `_recover`가 모든 역할을 검사한다.
-완료한 Nav2 목표는 재전송하지 않고, 종료된 실패 액션의 현재 목표만 재시도한다.
-운영자 pause는 명시적인 재개를 기다리고 cancel/ESTOP은 자동 재시도하지 않는다.
+`wait_for_recovery`는 단계·목표·목록·병목 소유권을 보존하고 `sequence.recovering`에 로봇별 복구 상태를 저장한다.
+해당 로봇만 STOP/HOLD하며 정상 로봇의 요청 갱신·완료·다음 waypoint 진행은 기존 병목 정책 안에서 계속 처리한다.
+해당 로봇 상태가 1초 정상이고 마지막 시도에서 3초가 지났으면 `_recover`가 그 역할만 검사한다.
+병목 소유자의 위치가 오래되어 점유가 불확실하면 공유 안전 오류로 두 로봇을 HOLD하고 기존 소유자·lease를 유지한다.
+소유자 위치가 다시 유효해지기 전에는 복구를 진행하지 않는다.
 
-**미해결:** B 차선이 시작 준비 상태로 돌아오지 않으면 A 최종 Nav2도 계속 HOLD된다.
-또한 HOLD 중 살아 있는 Nav2 액션을 취소하지 않아 progress checker가 실패할 수 있다.
-로봇별 복구 분리와 긴 의도적 HOLD에서 목표 보존·액션 종료·재전송은 아직 구현되지 않았다.
-해당 동작을 완료된 기능으로 문서화하거나 모의 테스트 통과로 현장 검증을 대신하지 않는다.
+복구 HOLD가 3초 이상 지속되면 해당 Nav2 액션 취소를 요청하고 현재 목표를 보존한다.
+취소 요청 승인만으로 재전송하지 않으며, 취소 중 오류가 나도 종료 결과 확인 전에는 새 목표를 보내지 않는다.
+복구 중 성공한 목표는 완료 처리하고, 종료된 실패·취소 목표만 해당 로봇에 재전송한다.
+늦게 도착한 취소 응답이나 오류가 이미 확정된 도착 성공을 덮어쓰지 않도록 액션 세대와 현재 핸들을 확인한다.
+운영자 전체 pause는 두 로봇을 HOLD하고 명시적인 재개를 기다리며 cancel/ESTOP은 자동 재시도하지 않는다.
+
+`lane_client.py`는 로봇 상태와 `/fleet/pose`의 원본 시각에 최대 100ms 앞섬을 허용한다.
+수신 지연과 원본의 과거 지연은 각각 1.5초 이내여야 하며, 더 큰 시계 차이·지연·비정상 값은 거부한다.
+기능 테스트 182개 통과(lint 3개 제외)와 실제 PC 작업공간 3개 패키지 빌드를 확인했다. UI·주행 노드를 실행하지 않은 오프라인 검증이며, 이전 전체 복구 대기의 현장 문제와 현재의 실제 전체 완주 미확인 상태는 [통합 시연 가이드](TWO_ROBOT_DEMO.md)에 구분해 기록한다.
 
 ## UI 입력과 종료
 
@@ -86,7 +91,7 @@ UI 종료 시 임무·permit·클라이언트·ROS context를 정리하고 함�
 
 | 변경 | 확인 대상 |
 |---|---|
-| 시연 전환·복구 | `demo_mission.py`, coordinator 정책, `test_demo_mission.py` |
+| 시연 전환·복구 | `demo_mission.py`, coordinator 정책, `test_demo_mission.py`, `test_demo_recovery.py` |
 | 시작·AMCL 기준 | demo 상수, lane client `localization_status`, 상태 검사 테스트 |
 | 로봇 ID/domain | `robot_config.py`, bridge YAML, 로봇 실행 인자 |
 | 차선 속도·기능 | 실제 운용 JSON, 로봇 launch watchdog 상한, mission server 기대값 |
