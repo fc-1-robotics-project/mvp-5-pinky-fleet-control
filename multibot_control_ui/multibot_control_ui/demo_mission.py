@@ -267,7 +267,9 @@ class TwoRobotDemo:
             yaw_variance_limit=POSE_YAW_VARIANCE_LIMIT)
 
     def _current_pose(self, name):
-        return self._pose_status(name)['pose']
+        return self.fleet.lane_navigation.localization_status(name,
+            position_variance_limit=self.fleet.node.lane_exit_position_variance,
+            yaw_variance_limit=POSE_YAW_VARIANCE_LIMIT)['pose']
 
     def _health_error(self, name):
         if not self.fleet.node.heartbeat_is_fresh(name):

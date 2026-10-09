@@ -14,6 +14,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile
 from rclpy.qos import ReliabilityPolicy
 from std_msgs.msg import Bool, String
+from vision_control.lane_client import SOURCE_FUTURE_TOLERANCE_S
 
 from .map_math import yaw_degrees_to_quaternion
 from .robot_config import ROBOT_BY_NAME, ROBOTS
@@ -345,7 +346,7 @@ class FleetControlNode(Node):
     def pose_is_fresh(self, robot_name: str) -> bool:
         """Return whether a recent localization pose exists."""
         age = self.pose_age(robot_name)
-        return age is not None and age <= self.pose_stale_sec
+        return age is not None and 0 <= age <= self.pose_stale_sec
 
     def arrival_is_close(self, robot_name, goal):
         if not self.pose_is_fresh(robot_name):
@@ -410,11 +411,21 @@ class FleetControlNode(Node):
         return message
 
     def pose_age(self, robot_name: str) -> Optional[float]:
-        """Return seconds since the last pose arrived."""
+        """Use the older of source and transport age; reject invalid source time."""
         received_at = self.pose_received_at.get(robot_name)
-        if received_at is None:
+        message = self.poses.get(robot_name)
+        if received_at is None or message is None:
             return None
-        return time.monotonic() - received_at
+        stamp = message.header.stamp
+        source_time = stamp.sec + stamp.nanosec / 1e9
+        source_age = self.get_clock().now().nanoseconds / 1e9 - source_time
+        received_age = time.monotonic() - received_at
+        if (message.header.frame_id != 'map' or source_time <= 0
+                or not 0 <= stamp.nanosec < 1_000_000_000
+                or not math.isfinite(source_age) or source_age < -SOURCE_FUTURE_TOLERANCE_S
+                or not math.isfinite(received_age) or received_age < 0):
+            return None
+        return max(source_age, received_age)
 
     def _route_command(self, message: Twist) -> None:
         if self.selected_robot is None:

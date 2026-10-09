@@ -654,3 +654,28 @@ def test_start_reports_remaining_required_conditions(scene, fault, message):
     with pytest.raises(ValueError, match=message):
         demo.start(plan(), 'map')
     assert not demo.active
+
+
+def test_exit_uses_tighter_position_limit_and_resets_dwell_on_uncertainty(scene):
+    fleet, demo, node, nav, lane, clock = scene
+    covariance = [.25]
+    observed_limits = []
+    def localization(name, **limits):
+        observed_limits.append(limits['position_variance_limit'])
+        pose = lane.current_localization(name)
+        return dict(pose=pose if covariance[0] <= limits['position_variance_limit'] else None,
+                    reason='position variance')
+    lane.localization_status = localization
+    lane.states['robot1'] = 'FOLLOWING'
+    node.positions['robot1'] = (1., 0.)
+    fleet.tick()
+    clock[0] += 1.
+    fleet.tick()
+    assert not node.finished
+    assert not demo.recovering  # The permissive start/health limit remains separate.
+    assert node.lane_exit_position_variance in observed_limits
+    covariance[0] = .0025
+    fleet.tick()
+    clock[0] += .5
+    fleet.tick()
+    assert node.finished == ['robot1']
