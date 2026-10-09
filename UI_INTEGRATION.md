@@ -1,6 +1,6 @@
 # 로봇·관제 실행 및 UI 사용법
 
-PC 복구 수정 브랜치: **`feat/demo-independent-recovery`** (`origin/develop` 기반). 로봇 설치는 기존 `codex/two-robot-demo-20261005` 통합 시연 기준을 사용한다. 최신 정리: 2026-10-09.
+PC 복구 수정 브랜치: **`feature/mission-recovery-position-20261009`** (`origin/develop` 기반). 로봇도 `feature/mission-recovery-position-20261009`를 함께 적용한다. 최신 정리: 2026-10-09.
 
 처음 설치하는 장비는 [로봇 설치](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md) / [관제 PC 설치](https://github.com/fc-1-robotics-project/mvp-5-pinky-fleet-control/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md)부터 진행합니다.
 
