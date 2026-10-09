@@ -26,6 +26,7 @@ def client():
     c.lock = Lock()
     c._goal_generation = 1
     c._goal_handle = Handle()
+    c._cancel_requested = False
     c._state, c._status = 'ACTIVE', '주행 중'
     return c
 
@@ -98,7 +99,7 @@ def test_rejected_cancel_retains_handle_and_can_retry_until_terminal_result():
     handle = c._goal_handle
     assert c.cancel_goal()
     handle.cancel_response.set_result(SimpleNamespace(goals_canceling=[]))
-    assert c.state() == 'ERROR' and c.has_active_goal()
+    assert c.state() == 'CANCELLING' and c.has_active_goal()
     assert c._goal_handle is handle
 
     handle.cancel_response = Future()

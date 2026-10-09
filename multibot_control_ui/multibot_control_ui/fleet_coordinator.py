@@ -34,6 +34,7 @@ class NavigationRequest:
     paused: bool = False
     lane_only: bool = False
     lane_duration_sec: float = 300.0
+    nav_suspended: bool = False
 
 
 @dataclass
@@ -86,13 +87,9 @@ class FleetCoordinator:
         """Enable supervision; unavailable robots remain held individually."""
         self.enabled = True
         self.emergency = False
-        for runtime in self.zones.values():
-            runtime.owner = None
-            runtime.lease_id = ''
-            runtime.state = 'FREE'
-            runtime.detail = ''
         if not self._update_occupancy():
             return False, self.summary
+        self._refresh_navigation_requests()
         self._apply_motion_policy()
         self.summary = self._make_summary()
         self.node.publish_permits_now()
@@ -109,6 +106,7 @@ class FleetCoordinator:
             if not request.phase.startswith('LANE') and request.phase not in {
                 'WAITING_FOR_LANE', 'SAFETY_HOLD', 'RELOCALIZING',
             }:
+                self._suspend_navigation(request)
                 request.phase = 'PAUSED'
         for runtime in self.zones.values():
             runtime.detail = '관제 일시정지'
@@ -125,6 +123,7 @@ class FleetCoordinator:
         for request in self.requests.values():
             request.phase = 'LANE_FAILED' if request.lane_only or request.lane_after_arrival else 'E_STOP_HOLD'
             request.delivered = False
+            request.nav_suspended = True
         for robot in ROBOTS:
             self.navigation.cancel_goal(robot.name)
             if self.lane_navigation is not None:
@@ -188,10 +187,6 @@ class FleetCoordinator:
             return False, '통합 시연을 중단한 뒤 수동 조작으로 전환하세요.'
         if self.emergency:
             return False, '긴급 정지를 먼저 해제하세요.'
-        if not self.enabled:
-            started, detail = self.start()
-            if not started:
-                return False, detail
         if not self.node.heartbeat_is_fresh(robot_name):
             return False, f'{robot_name} gate heartbeat가 오래되었습니다.'
         if self.zones and not self.node.pose_is_fresh(robot_name):
@@ -200,6 +195,11 @@ class FleetCoordinator:
         self.manual_robot = robot_name
         self._request_drive_mode(robot_name, 'MANUAL')
         self._set_manual_routing(robot_name, True)
+        self._suspend_navigation(self.requests.get(robot_name))
+        if not self.enabled:
+            started, detail = self.start()
+            if not started:
+                return False, detail
 
         self._update_occupancy()
         if self.emergency:
@@ -208,6 +208,8 @@ class FleetCoordinator:
         self.node.publish_permits_now()
         if robot_name in self.blocked_robots:
             return False, self.robot_details[robot_name]
+        if self.robot_details[robot_name].startswith('HOLD'):
+            return True, f'{robot_name} 수동 선택 · {self.robot_details[robot_name]}'
         self.robot_details[robot_name] = 'RUN · 수동 조작'
         return True, f'{robot_name} 수동 cmd_vel 허용'
 
@@ -217,18 +219,20 @@ class FleetCoordinator:
             return False, '통합 시연을 중단한 뒤 수동 조작으로 전환하세요.'
         if self.emergency:
             return False, '긴급 정지를 먼저 해제하세요.'
-        if not self.enabled:
-            started, detail = self.start()
-            if not started:
-                return False, detail
         if self.manual_robot == robot_name:
             self.manual_robot = None
             self._set_manual_routing(robot_name, False)
             self._request_drive_mode(
                 robot_name, self._autonomous_mode_for(robot_name),
             )
+            if not self.enabled:
+                started, detail = self.start()
+                if not started:
+                    return False, detail
             self._apply_motion_policy()
             self.node.publish_permits_now()
+            if self.robot_details[robot_name].startswith('HOLD'):
+                return True, f'{robot_name} 자율주행 선택 · {self.robot_details[robot_name]}'
             return True, f'{robot_name} 자율주행 복귀'
         if not self.node.heartbeat_is_fresh(robot_name):
             return False, f'{robot_name} gate heartbeat가 오래되었습니다.'
@@ -244,8 +248,15 @@ class FleetCoordinator:
         self.manual_robot = robot_name
         self._set_manual_routing(robot_name, True)
         self._request_drive_mode(robot_name, 'MANUAL')
+        self._suspend_navigation(self.requests.get(robot_name))
+        if not self.enabled:
+            started, detail = self.start()
+            if not started:
+                return False, detail
         self._apply_motion_policy()
         self.node.publish_permits_now()
+        if self.robot_details[robot_name].startswith('HOLD'):
+            return True, f'{robot_name} 수동 선택 · {self.robot_details[robot_name]}'
         return True, f'{robot_name} 수동 조작 전환'
 
     def submit_goal(
@@ -519,7 +530,6 @@ class FleetCoordinator:
 
     def _apply_motion_policy(self) -> None:
         """Hold only robots at an occupied zone's expanded boundary."""
-        previous_blocked = set(self.blocked_robots)
         blocked: Set[str] = set()
         reasons: Dict[str, str] = {}
 
@@ -556,10 +566,12 @@ class FleetCoordinator:
                 self.robot_details[name] = 'HOLD · ' + self.sequence.recovering[name]['reason']
                 continue
             if name in self.sequence_holds:
+                self._suspend_navigation(request)
                 self.node.set_gate_mode(name, FleetPermit.MODE_HOLD, reason=self.sequence_holds[name])
                 self.robot_details[name] = 'HOLD · ' + self.sequence_holds[name]
                 continue
             if request is not None and request.paused:
+                self._suspend_navigation(request)
                 self.node.set_gate_mode(name, FleetPermit.MODE_HOLD, reason='OPERATOR_PAUSED')
                 self.robot_details[name] = '일시정지 · 목표 유지'
                 continue
@@ -575,11 +587,10 @@ class FleetCoordinator:
                 self.robot_details[name] = f'HOLD · {request.phase}'
                 continue
             if name in blocked:
-                if (
-                    request is not None
-                    and request.phase == 'E_STOP_HOLD'
-                ):
-                    self._send_request(request)
+                demo_health_hold = (self.sequence is not None and self.sequence.owns(name)
+                                    and reasons[name] in {'GATE_HEARTBEAT_STALE', 'ROBOT_POSE_STALE'})
+                if not demo_health_hold:
+                    self._suspend_navigation(request)
                 self.node.set_gate_mode(
                     name,
                     FleetPermit.MODE_HOLD,
@@ -594,12 +605,26 @@ class FleetCoordinator:
                 continue
 
             if self.manual_robot == name:
+                self._suspend_navigation(request)
+                if self.navigation.state(name) in {'ACTIVE', 'PENDING', 'CANCELLING'}:
+                    self.node.set_gate_mode(name, FleetPermit.MODE_HOLD, reason='NAV_CANCEL_PENDING')
+                    self.robot_details[name] = 'HOLD · 수동 선택 · 이전 Nav2 종료 확인 중'
+                    continue
+                self._request_drive_mode(name, 'MANUAL')
                 self.node.set_gate_mode(
                     name,
                     FleetPermit.MODE_RUN,
                     reason='MANUAL',
                 )
                 self.robot_details[name] = 'RUN · 수동 조작'
+                continue
+
+            if self._is_nav_request(request) and self.navigation.state(name) == 'CANCELLING':
+                request.nav_suspended = True
+            if request is not None and request.nav_suspended and not self._resume_navigation(request):
+                self._request_drive_mode(name, 'STOP')
+                self.node.set_gate_mode(name, FleetPermit.MODE_HOLD, reason='NAV_CANCEL_PENDING')
+                self.robot_details[name] = 'HOLD · 이전 Nav2 종료 확인 중'
                 continue
 
             owned_zones = [
@@ -631,13 +656,6 @@ class FleetCoordinator:
                         else 'RUN · 차선 안전 정지'
                     )
                     continue
-                if name in previous_blocked:
-                    nav_state = self.navigation.state(name)
-                    if (
-                        not request.delivered
-                        or nav_state not in self._RUNNING_NAV_STATES
-                    ):
-                        self._send_request(request)
                 request.phase = (
                     'ACTIVE' if request.delivered else 'NAV_PENDING'
                 )
@@ -668,6 +686,7 @@ class FleetCoordinator:
                 continue
             nav_state = self.navigation.state(name)
             if request.delivered and nav_state == 'SUCCEEDED':
+                request.nav_suspended = False  # This Nav2 action has ended, including during HOLD.
                 if request.lane_after_arrival:
                     if self.manual_robot == name:
                         continue
@@ -693,6 +712,8 @@ class FleetCoordinator:
                 continue
             if (
                 not request.delivered
+                and self.manual_robot != name
+                and not request.nav_suspended and name not in self.blocked_robots
                 and time.monotonic() - request.last_send_attempt >= 1.0
             ):
                 self._send_request(request)
@@ -823,13 +844,49 @@ class FleetCoordinator:
 
     def _send_request(self, request: NavigationRequest) -> bool:
         """Attempt one nonblocking Nav2 send and retain failure for retry."""
+        if self.navigation.state(request.robot_name) in {'ACTIVE', 'PENDING', 'CANCELLING'}:
+            self._suspend_navigation(request)
+            return False
         request.last_send_attempt = time.monotonic()
         request.delivered = self.navigation.send_goal(
             request.robot_name,
             *request.goal,
         )
         request.phase = 'ACTIVE' if request.delivered else 'NAV_PENDING'
+        if request.delivered:
+            request.nav_suspended = False
+        elif self.navigation.state(request.robot_name) == 'CANCELLING':
+            request.nav_suspended = True
         return request.delivered
+
+    @staticmethod
+    def _is_nav_request(request):
+        return request is not None and not request.lane_only and request.phase not in {
+            'LANE_PENDING', 'WAITING_FOR_LANE', 'LANE_ACTIVE', 'SAFETY_HOLD',
+            'RELOCALIZING', 'LANE_FAILED', 'LANE_STOPPING', 'SUCCEEDED',
+        }
+
+    def _suspend_navigation(self, request):
+        """Retain a destination while requesting cancellation exactly once."""
+        if not self._is_nav_request(request):
+            return
+        request.nav_suspended = True
+        if self.navigation.state(request.robot_name) in {'ACTIVE', 'PENDING'}:
+            self.navigation.cancel_goal(request.robot_name)
+
+    def _resume_navigation(self, request):
+        """Wait for the old action result before issuing the retained goal."""
+        if self.manual_robot == request.robot_name:
+            return False
+        state = self.navigation.state(request.robot_name)
+        if state in {'ACTIVE', 'PENDING', 'CANCELLING'}:
+            return False
+        if request.delivered and state == 'SUCCEEDED':
+            return False  # The normal result lifecycle consumes success next tick.
+        if not self._send_request(request):
+            return False
+        self._request_drive_mode(request.robot_name, 'NAV2')
+        return True
 
     def _hold_all(self, reason: str) -> None:
         for robot in ROBOTS:

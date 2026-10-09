@@ -20,6 +20,8 @@ def asynchronous_cancels(nav):
     cancellations = []
 
     def cancel(name):
+        if nav.states[name] == 'CANCELLING':
+            return True  # Match the real client's in-flight cancellation latch.
         cancellations.append(name)
         nav.cancelled.append(name)
         nav.states[name] = 'CANCELLING'
