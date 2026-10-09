@@ -1,12 +1,12 @@
 # Pinky Fleet Control
 
-**공유 브랜치: `codex/two-robot-demo-20261005` · 기준일: 2026-10-06**
+**작업 브랜치: `feat/demo-independent-recovery` · 기준: `origin/develop` · 기준일: 2026-10-09**
 
 Pinky의 Nav2 이동·두 로봇 통합 시연·차선 단독 시험을 하나의 Tk UI에서 제어합니다.
 
 1. **새 PC 설치:** [TEAM_LANE_GUIDE.md](TEAM_LANE_GUIDE.md)
 2. **실행 명령·버튼 사용·종료:** [UI_INTEGRATION.md](UI_INTEGRATION.md)
-3. **로봇 설치:** [같은 브랜치의 로봇 가이드](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md)
+3. **로봇 설치:** [기존 통합 시연의 로봇 가이드](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md)
 
 ## 구성
 
@@ -17,7 +17,7 @@ Pinky의 Nav2 이동·두 로봇 통합 시연·차선 단독 시험을 하나�
 | `multibot_control_ui` | UI·Nav2 client·모드/병목 관제·지도 좌표 선택 |
 
 기본 domain: robot1=21, robot2=19, 관제=22. 브리지는 UI launch가 함께 실행합니다.
-로봇 소스는 [pinky-lane-driving](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/tree/codex/two-robot-demo-20261005)에 있습니다. 두 저장소의 같은 브랜치를 함께 빌드합니다.
+로봇 소스는 [pinky-lane-driving](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/tree/codex/two-robot-demo-20261005)에 있습니다. 이번 복구 수정은 기존 통합 시연 로봇과 연결하는 PC 관제 패키지에 적용합니다.
 
 ## 설치된 PC에서 실행
 
@@ -31,7 +31,7 @@ ros2 launch multibot_control_ui control_ui.launch.py
 
 설치·빌드는 위 팀 가이드에 있습니다. 현재 저장소의 차선 프로필은 기본/최대/한쪽 보완 **0.09m/s**, 차선 소실 유지/횡단보도 감속 **0.06m/s**, YOLO **448**, 라이다 물체 정지 **ON**입니다. 기체 홈의 운용 JSON은 별도 파일이므로 실행 인자와 실제 내용을 확인합니다.
 
-**관제의 전체 복구 대기가 다른 로봇의 최종 Nav2 주행까지 멈추는 문제가 남아 있습니다.** 이 브랜치는 검토용이며 전체 통합 시연 완주를 보장하지 않습니다. [통합 시연 가이드의 현장 확인 사항](multibot_control_ui/docs/TWO_ROBOT_DEMO.md#현장-확인과-남은-문제-2026-10-06)을 먼저 확인하세요.
+**로봇별 복구 대기를 분리해 정상 로봇은 기존 병목 허가 안에서 계속 진행합니다.** 병목 점유 위치가 불확실하면 전체 HOLD를 유지하며, 긴 복구 대기의 Nav2 목표는 종료 확인 후 해당 로봇만 재전송합니다. 원본 시각의 최대 100ms 앞섬을 허용하고 수신·원본 지연 상한 1.5초는 유지합니다. 기능 테스트 182개 통과(lint 3개 제외)와 실제 PC 작업공간 3개 패키지 빌드를 확인했습니다. 검증은 오프라인 범위이며 실제 전체 통합 시연 완주는 미확인입니다. [통합 시연 가이드](multibot_control_ui/docs/TWO_ROBOT_DEMO.md)에 현재 동작과 이전 버전의 현장 결과를 구분해 기록했습니다.
 
 ## 개발 문서
 

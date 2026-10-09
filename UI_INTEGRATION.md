@@ -1,6 +1,6 @@
 # 로봇·관제 실행 및 UI 사용법
 
-두 저장소 모두 **`codex/two-robot-demo-20261005`** 사용. 최신 정리: 2026-10-06.
+PC 복구 수정 브랜치: **`feat/demo-independent-recovery`** (`origin/develop` 기반). 로봇 설치는 기존 `codex/two-robot-demo-20261005` 통합 시연 기준을 사용한다. 최신 정리: 2026-10-09.
 
 처음 설치하는 장비는 [로봇 설치](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md) / [관제 PC 설치](https://github.com/fc-1-robotics-project/mvp-5-pinky-fleet-control/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md)부터 진행합니다.
 
@@ -19,7 +19,7 @@
 
 로봇 홈의 JSON은 Git 갱신으로 바뀌지 않습니다. `lane_control_config`로 지정한 실제 파일을 먼저 확인합니다. 비상정지·관제 permit·로컬 허가 만료·영상/센서 오류 점검은 유지됩니다.
 
-**전체 통합 시연 완주는 미확인입니다.** 2026-10-06 현장 시험에서는 관제 전체 복구 대기가 A의 최종 Nav2까지 멈췄습니다. 자세한 현재 동작과 남은 문제는 [통합 시연 가이드](multibot_control_ui/docs/TWO_ROBOT_DEMO.md)에 있습니다.
+**전체 통합 시연 완주는 미확인입니다.** 2026-10-06 이전 버전 현장 시험에서는 관제 전체 복구 대기가 A의 최종 Nav2까지 멈췄습니다. 현재 PC 수정은 로봇별 복구를 분리해 정상 로봇이 기존 병목 허가 안에서 계속 진행하도록 합니다. 병목 점유 위치가 불확실하면 전체 HOLD를 유지합니다. 이번 수정은 오프라인 검증 범위이며 자세한 동작과 이전 현장 기록은 [통합 시연 가이드](multibot_control_ui/docs/TWO_ROBOT_DEMO.md)에 있습니다.
 
 ## 1. 로봇 SSH 터미널 — 한 번 실행
 

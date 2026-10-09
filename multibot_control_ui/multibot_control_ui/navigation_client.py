@@ -100,11 +100,11 @@ class RobotNavigationClient:
         with self.lock:
             goal_handle = self._goal_handle
             generation = self._goal_generation
-        if goal_handle is None:
-            self._set_status('취소할 활성 목표 없음')
-            return False
-        self._set_status('목표 취소 요청 중')
-        self._set_state('CANCELLING')
+            if goal_handle is None:
+                self._status = '취소할 활성 목표 없음'
+                return False
+            self._status = '목표 취소 요청 중'
+            self._state = 'CANCELLING'
         future = goal_handle.cancel_goal_async()
         future.add_done_callback(
             lambda result: self._cancel_done_callback(result, generation),
@@ -130,6 +130,11 @@ class RobotNavigationClient:
         """Return a stable machine-readable navigation state."""
         with self.lock:
             return self._state
+
+    def has_active_goal(self) -> bool:
+        """Report whether a goal handle remains without a terminal result."""
+        with self.lock:
+            return self._goal_handle is not None
 
     def shutdown(self) -> None:
         """Stop the domain-specific executor and release its ROS context."""
@@ -215,19 +220,15 @@ class RobotNavigationClient:
         try:
             response = future.result()
             cancelled = bool(response.goals_canceling)
+            status = '목표 취소 처리 중' if cancelled else '목표 취소 거부됨'
+            state = 'CANCELLING' if cancelled else 'ERROR'
         except Exception as error:  # ROS future exceptions are implementation-specific.
-            self._set_result_if_current(
-                generation,
-                f'취소 실패: {error}',
-                'ERROR',
-            )
-            return
+            status, state = f'취소 실패: {error}', 'ERROR'
         with self.lock:
-            if generation != self._goal_generation:
+            if (generation != self._goal_generation or self._goal_handle is None
+                    or self._state in {'SUCCEEDED', 'CANCELED', 'ABORTED', 'REJECTED'}):
                 return
-            self._status = (
-                '목표 취소 처리 중' if cancelled else '목표 취소 거부됨'
-            )
+            self._status, self._state = status, state
 
     def _set_status(self, text: str) -> None:
         with self.lock:
@@ -281,6 +282,10 @@ class FleetNavigationClients:
     def state(self, robot_name: str) -> str:
         """Get a machine-readable navigation state for one robot."""
         return self.clients[robot_name].state()
+
+    def has_active_goal(self, robot_name: str) -> bool:
+        """Report whether the named robot still has an accepted goal handle."""
+        return self.clients[robot_name].has_active_goal()
 
     def shutdown(self) -> None:
         """Shut down every domain-specific action client."""
