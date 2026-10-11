@@ -1,6 +1,7 @@
 from concurrent.futures import Future
 from threading import Lock
 from types import SimpleNamespace
+import pytest
 from vision_control.lane_client import RobotLaneClient
 
 
@@ -63,11 +64,27 @@ def test_localization_requires_post_reset_sample_and_consistent_pose():
         pose=SimpleNamespace(covariance=covariance,pose=SimpleNamespace(position=SimpleNamespace(x=1.,y=2.),
              orientation=SimpleNamespace(x=0.,y=0.,z=0.,w=1.))))
     c._localization = (now, message)
+    c.node = SimpleNamespace(get_clock=lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=101_000_000_000)))
     assert c.localization_ready(now-.1, (1.,2.,0.))
     assert not c.localization_ready(now+.1, (1.,2.,0.))
     assert not c.localization_ready(now-.1, (3.,2.,0.))
     message.header.stamp.sec = 99
     assert not c.localization_ready(now-.1, (1.,2.,0.))
+
+
+def test_relocalization_rejects_stale_or_future_source_even_after_reset():
+    import time
+    c = pose_client(.0025)
+    now = time.monotonic()
+    message = c._fleet_localization[1]
+    c.node = SimpleNamespace(get_clock=lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=105_000_000_000)))
+    c._localization = (now, message)
+    c._localization_epoch = (now - .2, 100.)
+    for stamp in (101, 106):
+        message.header.stamp.sec = stamp
+        assert not c.localization_ready(now - .1, (1., 2., 0.))
 
 
 def test_cancel_late_completed_goal_does_not_deadlock():
@@ -202,3 +219,55 @@ def test_relaxed_demo_limits_do_not_accept_stale_invalid_or_unknown_localization
         status = c.localization_status(**demo_limits())
         assert status['pose'] is None, fault
         assert status['reason'], fault
+
+
+def timed_pose_client(monkeypatch, source_age_ms, received_age_s=0.):
+    monkeypatch.setattr('vision_control.lane_client.time.monotonic', lambda: 1000.)
+    c = pose_client()
+    message = c._fleet_localization[1]
+    source_ns = 101_000_000_000 - source_age_ms * 1_000_000
+    message.header.stamp.sec, message.header.stamp.nanosec = divmod(source_ns, 1_000_000_000)
+    c._fleet_localization = (1000. - received_age_s, message)
+    c._mission_received = 1000. - received_age_s
+    c._mission_status = dict(status_time_s=source_ns / 1e9, exit_status=dict(version=1))
+    return c
+
+
+@pytest.mark.parametrize('source_age_ms, expected_fresh', [
+    (-15, True), (-60, True), (-100, True), (-101, False),
+    (1500, True), (1501, False),
+])
+def test_demo_pose_and_status_share_bounded_clock_tolerance(monkeypatch, source_age_ms, expected_fresh):
+    c = timed_pose_client(monkeypatch, source_age_ms)
+    assert (c.current_localization(**demo_limits()) is not None) is expected_fresh
+    assert c.telemetry()['fresh'] is expected_fresh
+
+
+@pytest.mark.parametrize('received_age_s, expected_fresh', [
+    (-.001, False), (1.5, True), (1.6, False),
+])
+def test_small_source_clock_lead_does_not_bypass_receive_age(monkeypatch, received_age_s, expected_fresh):
+    c = timed_pose_client(monkeypatch, -60, received_age_s)
+    assert (c.current_localization(**demo_limits()) is not None) is expected_fresh
+    assert c.telemetry()['fresh'] is expected_fresh
+
+
+@pytest.mark.parametrize('stamp', ['missing', None, float('nan'), float('inf'), float('-inf'), True, False])
+def test_clock_tolerance_does_not_accept_invalid_status_timestamps(monkeypatch, stamp):
+    c = timed_pose_client(monkeypatch, -60)
+    if stamp == 'missing':
+        c._mission_status.pop('status_time_s')
+    else:
+        c._mission_status['status_time_s'] = stamp
+    assert not c.telemetry()['fresh']
+
+
+@pytest.mark.parametrize('ahead,expected', [(50_000_000, True), (100_000_000, True), (110_000_000, False)])
+def test_reset_localization_keeps_source_clock_tolerance(ahead, expected, monkeypatch):
+    monkeypatch.setattr('vision_control.lane_client.time.monotonic', lambda: 102.)
+    c = pose_client(position_variance=.0025, yaw_variance=.0025)
+    message = c._fleet_localization[1]
+    message.header.stamp.nanosec = ahead
+    c._localization = (102., message)
+    c._localization_epoch = (100., 100.)
+    assert c.localization_ready(100., (1., 2., 0.)) is expected
