@@ -241,9 +241,7 @@ class TwoRobotDemo:
     def _cancel_recovery_nav(self, role, now):
         task, name = self.tasks[role], self.plan[role.lower()]
         task['retry_requested'] = task['recovery_cancel_pending'] = True
-        state = self.fleet.navigation.state(name)
-        if state == 'CANCELLING':
-            return
+        # The client suppresses duplicate pending RPCs but permits retry after failure.
         if now - task.get('last_cancel_attempt', -math.inf) >= RECOVERY_DELAY_S:
             task['last_cancel_attempt'] = now
             self.fleet.navigation.cancel_goal(name)
@@ -267,7 +265,9 @@ class TwoRobotDemo:
             yaw_variance_limit=POSE_YAW_VARIANCE_LIMIT)
 
     def _current_pose(self, name):
-        return self._pose_status(name)['pose']
+        return self.fleet.lane_navigation.localization_status(name,
+            position_variance_limit=self.fleet.node.lane_exit_position_variance,
+            yaw_variance_limit=POSE_YAW_VARIANCE_LIMIT)['pose']
 
     def _health_error(self, name):
         if not self.fleet.node.heartbeat_is_fresh(name):
@@ -340,7 +340,7 @@ class TwoRobotDemo:
                 task['finish_sent'] = now
             self.detail = f'복구 대기 · {name}: 차선 완료 응답/STOP·허가 OFF 재확인'
             return False
-        retry = (task.get('retry_requested') or now - task['started'] > 900.
+        retry = (request.nav_suspended or task.get('retry_requested') or now - task['started'] > 900.
                  or request.phase == 'LANE_FAILED'
                  or state in {'ABORTED', 'REJECTED', 'CANCELED', 'ERROR', 'UNAVAILABLE'}
                  or current is None)
@@ -439,7 +439,7 @@ class TwoRobotDemo:
         state = (f.navigation if task['kind'] == 'NAV' else f.lane_navigation).state(name)
         if (request.phase == 'LANE_FAILED'
                 or state in {'ABORTED', 'REJECTED', 'CANCELED', 'ERROR', 'UNAVAILABLE'}
-                and name not in f.blocked_robots):
+                and name not in f.blocked_robots and not request.nav_suspended):
             self.wait_for_recovery(f'{name}: {state} / {request.phase}', robot=name)
             return False
         if now - task['started'] > 900.:

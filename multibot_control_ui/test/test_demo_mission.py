@@ -433,7 +433,7 @@ def test_recovery_health_must_be_continuous_and_operator_pause_prevents_retry(sc
     assert demo.active
     fleet.start()
     fleet.tick()
-    assert not demo.recovering and len(nav.sent) == len(sent) + 1
+    assert not demo.recovering and len(nav.sent) == len(sent) + 2
 
 
 def test_lane_failure_waits_for_cleanup_and_readiness_before_retry(scene):
@@ -450,6 +450,7 @@ def test_lane_failure_waits_for_cleanup_and_readiness_before_retry(scene):
     clock[0] += 3.1
     fleet.tick()
     assert not demo.recovering and len(lane.sent) == 2
+    assert not nav.sent
     assert demo.tasks['A']['request'].mission_id != request.mission_id
     assert demo.stage == 'A_LANE' and not nav.sent
 
@@ -513,13 +514,13 @@ def test_segment_timeout_waits_for_cancellation_before_retry(scene):
     sent = list(nav.sent)
     clock[0] += 901.
     demo.tasks['B']['started'] = clock[0]  # Isolate the expired A segment.
-    fleet.tick()
-    assert demo.active and demo.recovering
     def asynchronous_cancel(name):
         nav.cancelled.append(name)
         nav.states[name] = 'CANCELLING'
         return True
     nav.cancel_goal = asynchronous_cancel
+    fleet.tick()
+    assert demo.active and demo.recovering
     recover(scene)
     assert demo.recovering and nav.sent == sent
     clock[0] += 3.1
@@ -611,7 +612,97 @@ def test_initial_pose_default_covariance_starts_and_does_not_immediately_recover
     assert demo.active and demo.stage == 'A_LANE' and not demo.recovering
     fleet.tick()
     assert not demo.recovering and len(lane.sent) == 2
-    assert not nav.sent
+
+
+def test_exit_uses_tighter_position_limit_and_resets_dwell_on_uncertainty(scene):
+    fleet, demo, node, nav, lane, clock = scene
+    covariance = [.25]
+    observed_limits = []
+    def localization(name, **limits):
+        observed_limits.append(limits['position_variance_limit'])
+        pose = lane.current_localization(name)
+        return dict(pose=pose if covariance[0] <= limits['position_variance_limit'] else None,
+                    reason='position variance')
+    lane.localization_status = localization
+    lane.states['robot1'] = 'FOLLOWING'
+    node.positions['robot1'] = (1., 0.)
+    fleet.tick()
+    clock[0] += 1.
+    fleet.tick()
+    assert not node.finished
+    assert not demo.recovering  # The permissive start/health limit remains separate.
+    assert node.lane_exit_position_variance in observed_limits
+    covariance[0] = .0025
+    fleet.tick()
+    clock[0] += .5
+    fleet.tick()
+    assert node.finished == ['robot1']
+
+
+def test_individual_nav_failure_keeps_healthy_peer_running(scene):
+    fleet, demo, node, nav, lane, clock = scene
+    finish_lane(scene, 'A')
+    nav.states['robot1'] = 'ABORTED'
+    fleet.tick()
+    assert demo.recovering
+    assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+    assert node.modes['robot2'][0] == FleetPermit.MODE_RUN
+    assert nav.states['robot2'] == 'ACTIVE'
+    finish_nav(scene, 'B')
+    assert 'B' in demo.route_done
+    sent = [goal for goal in nav.sent if goal[0] == 'robot2']
+    recover(scene)
+    assert [goal for goal in nav.sent if goal[0] == 'robot2'] == sent
+
+
+@pytest.mark.parametrize('after_resume', ['ABORTED', 'SUCCEEDED', 'health_fault'])
+def test_partial_B_lane_recovery_restores_nav_mode_and_processes_peer_result(scene, after_resume):
+    fleet, demo, node, nav, lane, clock = scene
+    finish_lane(scene, 'A')
+    finish_nav(scene, 'A')
+    finish_nav(scene, 'B')
+    finish_nav(scene, 'B')
+    assert demo.stage == 'B_LANE'
+    assert demo.tasks['A']['kind'] == 'NAV' and demo.tasks['B']['kind'] == 'LANE'
+    lane.states['robot2'] = 'FOLLOWING'
+    fleet.tick()
+    demo.wait_for_recovery('공유 병목 점유 재확인', reset_health=True)
+    assert demo.is_recovering('robot1') and demo.is_recovering('robot2')
+    assert node.drive_modes['robot1'] == 'STOP'
+    lane.states['robot2'] = 'CANCELED'
+    lane.statuses['robot2'].update(active=False, mode='STOP', permission_enabled=False,
+                                  cleanup_ok=False, ready=False)
+    recover(scene)
+    assert demo.recovering and not demo.is_recovering('robot1')
+    assert demo.is_recovering('robot2')
+    assert nav.states['robot1'] == 'ACTIVE'
+    assert node.drive_modes['robot1'] == 'NAV2'
+    assert node.modes['robot1'][0] == FleetPermit.MODE_RUN
+    sent = list(nav.sent)
+    if after_resume == 'health_fault':
+        node.pose_fresh['robot2'] = False
+        demo.wait_for_recovery('공유 병목 점유 재확인', reset_health=True)
+        fleet.tick()
+        assert demo.is_recovering('robot1') and demo.is_recovering('robot2')
+        assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+        assert node.drive_modes['robot1'] == 'STOP'
+        assert nav.sent == sent
+        return
+    nav.states['robot1'] = after_resume
+    fleet.tick()
+    if after_resume == 'SUCCEEDED':
+        assert 'A' not in demo.tasks
+        clock[0] += 4.2
+        fleet.tick()
+        assert nav.sent == sent
+    else:
+        assert demo.is_recovering('robot1')
+        assert 'robot1' in demo.recovering
+        assert node.modes['robot1'][0] == FleetPermit.MODE_HOLD
+        recover(scene)
+        assert nav.sent == sent + [('robot1', *plan()['a_final'])]
+        assert node.drive_modes['robot1'] == 'NAV2'
+        assert demo.recovering and demo.is_recovering('robot2')
 
 
 def test_start_reports_actual_excessive_covariance_instead_of_generic_not_ready(scene):

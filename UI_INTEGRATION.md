@@ -1,23 +1,23 @@
 # 로봇·관제 실행 및 UI 사용법
 
-PC 복구 수정 브랜치: **`feat/demo-independent-recovery`** (`origin/develop` 기반). 로봇 설치는 기존 `codex/two-robot-demo-20261005` 통합 시연 기준을 사용한다. 최신 정리: 2026-10-09.
+PC 복구 수정 브랜치: **`feature/mission-recovery-position-20261009`** (`origin/develop` 기반). 로봇도 `feature/mission-recovery-position-20261009`를 함께 적용한다. 최신 정리: 2026-10-09.
 
-처음 설치하는 장비는 [로봇 설치](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md) / [관제 PC 설치](https://github.com/fc-1-robotics-project/mvp-5-pinky-fleet-control/blob/codex/two-robot-demo-20261005/TEAM_LANE_GUIDE.md)부터 진행합니다.
+처음 설치하는 장비는 [로봇 설치](https://github.com/fc-1-robotics-project/mvp-5-pinky-lane-driving/blob/feature/mission-recovery-position-20261009/TEAM_LANE_GUIDE.md) / [관제 PC 설치](TEAM_LANE_GUIDE.md)부터 진행합니다.
 
 ## 현재 공유 설정
 
 | 항목 | 값 |
 |---|---|
 | 기본·최대·한쪽 경계 보완 속도 | **0.09m/s** |
-| 차선 소실 유지 / 횡단보도 감속 속도 | **0.06m/s** |
+| 차선 소실 유지 / 횡단보도 접근·재출발 속도 상한 | **0.06m/s** |
 | 차선 각속도 상한 / 최소 추종 거리 / 조향 배율 | 0.6rad/s / 0.10m / 1.2 |
 | 카메라 / YOLO 입력 | 640×480 / **448** |
-| 횡단보도 / 라이다 물체 자동 정지 | 인식·감속 ON, 횡단보도 정지 OFF / **라이다 정지 ON** |
+| 횡단보도 / 라이다 물체 자동 정지 | 인식·정지 ON, odom 정지 확인 후 **2초 WAIT → 재출발** / **라이다 정지 ON** |
 | 일시 인식 소실 | 측정했던 경로를 odom으로 변환해 최대 1.5초·6cm 안에서만 사용 |
 
-저장소의 `lane_control.json`과 `lane_control_lane_only.json`은 현재 같은 운용 값을 갖습니다. 파일 이름으로 기능 ON/OFF를 판단하지 않습니다. 두 프로필 모두 `crosswalk_control_enabled=true`, `behavior.crosswalk_stop=false`, `lidar_obstacle_stop_enabled=true`입니다. 횡단보도는 감속해 통과하고 라이다 물체 판정은 정지시킬 수 있습니다. PR #4는 조향 경로를 유지하면서 직진 반응 구간만 차로 내부 점으로 검사합니다. Nav2 장애물 회피는 별도 설정입니다.
+저장소의 `lane_control.json`과 `lane_control_lane_only.json`은 현재 같은 운용 값을 갖습니다. 파일 이름으로 기능 ON/OFF를 판단하지 않습니다. 두 기본 프로필 모두 `crosswalk_control_enabled=true`, `behavior.crosswalk_stop=true`, `lidar_obstacle_stop_enabled=true`입니다. 횡단보도는 최대 0.06m/s로 접근하다 정지 명령을 내리고, odom의 절대 속도가 0.01m/s 이하인 정지를 확인합니다. 안전 조건이 유지된 상태에서 2초 WAIT 후 최대 0.06m/s로 재출발합니다. 라이다 물체 판정은 별도로 정지시킬 수 있습니다. PR #4는 조향 경로를 유지하면서 직진 반응 구간만 차로 내부 점으로 검사합니다. Nav2 장애물 회피는 별도 설정입니다.
 
-로봇 홈의 JSON은 Git 갱신으로 바뀌지 않습니다. `lane_control_config`로 지정한 실제 파일을 먼저 확인합니다. 비상정지·관제 permit·로컬 허가 만료·영상/센서 오류 점검은 유지됩니다.
+로봇 홈의 JSON은 Git 갱신으로 바뀌지 않습니다. `lane_control_config`로 지정한 실제 파일의 `behavior.crosswalk_stop=true`와 `wait_s=2.0`, 실행 중 사용하는 설치 코드 버전을 각각 확인합니다. 기존 홈 JSON이 `false`이면 저장소 기본 프로필을 업데이트해도 감속 통과 설정이 유지됩니다. 기체별 보정은 보존하고, 실제 STOP·허가 해제·로봇 정지를 확인한 상태에서 적용합니다. 비상정지·관제 permit·로컬 허가 만료·영상/센서 오류 점검은 유지됩니다.
 
 **전체 통합 시연 완주는 미확인입니다.** 2026-10-06 이전 버전 현장 시험에서는 관제 전체 복구 대기가 A의 최종 Nav2까지 멈췄습니다. 현재 PC 수정은 로봇별 복구를 분리해 정상 로봇이 기존 병목 허가 안에서 계속 진행하도록 합니다. 병목 점유 위치가 불확실하면 전체 HOLD를 유지합니다. 이번 수정은 오프라인 검증 범위이며 자세한 동작과 이전 현장 기록은 [통합 시연 가이드](multibot_control_ui/docs/TWO_ROBOT_DEMO.md)에 있습니다.
 
@@ -131,10 +131,12 @@ ROS_DOMAIN_ID=21 ros2 topic echo /cmd_vel --once
 
 ## 7. 최신 시험 환경의 경로 예시
 
-| 장치 | robot_id / domain | map | lane_control_config |
-|---|---|---|---|
-| A | robot1 / 21 | `/home/pinky/261003.yaml` | `/home/pinky/pinky_calibration/lane_control_lane_only_verified_20261001.json` |
-| B | robot2 / 19 | `/home/pinky/pinky_robot_ws/src/pinky-lane-driving/pinky_navigation/map/261003.yaml` | `/home/pinky/pinky_calibration/lane_control_lane_only.json` |
-| 관제 | domain 22 | 로봇 지도 수신 | PC는 차선 JSON을 실행하지 않음 |
+| 장치 | robot_id / domain | IP / 실행 스크립트 | map | lane_control_config |
+|---|---|---|---|---|
+| A | robot1 / 21 | `192.168.1.139` / `/home/pinky/pinky_robot_ws/run_robot1.sh` | `/home/pinky/261003.yaml` | `/home/pinky/pinky_calibration/lane_control_lane_only_verified_20261001.json` |
+| B | robot2 / 19 | `192.168.1.152` / `/home/pinky/pinky_robot_ws/run_robot2.sh` | `/home/pinky/pinky_robot_ws/src/pinky-lane-driving/pinky_navigation/map/261003.yaml` | `/home/pinky/pinky_calibration/lane_control_lane_only.json` |
+| 관제 | domain 22 | GUI 터미널의 관제 launch | 로봇 지도 수신 | PC는 차선 JSON을 실행하지 않음 |
 
 위 경로는 현재 시험 장비의 예시입니다. 새 기체는 실제 지도 위치와 자체 보정을 사용합니다. B 실행 시 1절의 `ROS_DOMAIN_ID=19`, `robot_id:=robot2`를 함께 변경합니다. `PINKY_FLEET_ROBOTS`를 해제하면 등록된 두 로봇을 모두 표시합니다.
+
+기존 기체는 해당 스크립트의 `lane_control_config`와 source하는 install 경로를 확인합니다. 스크립트로 시작했다면 1절의 launch를 추가 실행하지 않습니다. 시작 전 해당 기체 홈 JSON의 횡단보도 정지 설정과 설치 코드 업데이트를 모두 확인하고, 현장에서 정지 위치·odom 정지 확인·2초 대기·안전한 재출발을 검증합니다. 기본 설정 변경만으로 실주행 검증이 완료된 것은 아닙니다.
